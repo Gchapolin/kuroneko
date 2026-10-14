@@ -111,6 +111,10 @@ import Testing
         #expect(list.first?.people == ["Renato"])
         #expect(list.first?.noteCount == 1)
         #expect(list.first?.documents == ["summary"])
+        #expect(list.first?.unnamedVoiceCount == 1)
+        #expect(list.first?.links == [])
+        #expect(list.first?.attachmentCount == 0)
+        #expect(list.first?.openTaskCount == 1)
     }
 
     @Test func documentsAreOnePerKindAndReplaced() throws {

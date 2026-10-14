@@ -782,6 +782,18 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// Voices nobody named yet that are worth asking about, per meeting.
+    public func unnamedVoiceCounts() throws -> [Int64: Int] {
+        try writer.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT meetingId, count(*) AS n FROM meetingSpeaker
+                WHERE personId IS NULL AND speechMs >= ?
+                GROUP BY meetingId
+                """, arguments: [VoiceReview.minSpeechMs])
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0["meetingId"], $0["n"]) })
+        }
+    }
+
     public func attachmentCounts() throws -> [Int64: Int] {
         try writer.read { db in
             let rows = try Row.fetchAll(db, sql: """

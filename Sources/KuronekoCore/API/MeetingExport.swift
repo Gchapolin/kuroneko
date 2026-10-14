@@ -36,6 +36,8 @@ public struct MeetingListItem: Codable, Equatable, Sendable {
     public var openTaskCount: Int
     /// Something new the user hasn't seen (a summary written by itself).
     public var newsAt: Date?
+    /// Voices still without a name.
+    public var unnamedVoiceCount: Int
 }
 
 /// Everything about one meeting, in the shape every client reads: the
@@ -169,6 +171,7 @@ extension AppDatabase {
         let links = try linksByMeeting()
         let attachments = try attachmentCounts()
         let openTasks = Dictionary(grouping: try openTasks(), by: \.meetingId)
+        let unnamedVoices = try unnamedVoiceCounts()
         return WeekGrouping.group(try meetings(), now: now, calendar: calendar).flatMap { group in
             group.meetings.compactMap { meeting -> MeetingListItem? in
                 guard let id = meeting.id else { return nil }
@@ -187,7 +190,8 @@ extension AppDatabase {
                     links: (links[id] ?? []).map(MeetingExport.Link.init),
                     attachmentCount: attachments[id] ?? 0,
                     openTaskCount: openTasks[id]?.count ?? 0,
-                    newsAt: meeting.newsAt
+                    newsAt: meeting.newsAt,
+                    unnamedVoiceCount: unnamedVoices[id] ?? 0
                 )
             }
         }
