@@ -21,7 +21,7 @@ public final class AppDatabase: Sendable {
         try AppDatabase(DatabaseQueue())
     }
 
-    private static var migrator: DatabaseMigrator {
+    static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
         migrator.registerMigration("v1") { db in
@@ -91,34 +91,130 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v2") { db in
+            // Fixed meeting/note kinds become free tags; the old kind is kept
+            // as the first tag.
+            try db.alter(table: "meeting") { t in
+                t.add(column: "tags", .text).notNull().defaults(to: "[]")
+                t.add(column: "source", .text)
+                t.add(column: "audioStartedAt", .datetime)
+                t.add(column: "status", .text).notNull().defaults(to: ProcessingStatus.recorded.rawValue)
+                t.add(column: "statusDetail", .text)
+            }
+            try db.execute(sql: "UPDATE meeting SET tags = json_array(kind)")
+            try db.execute(
+                sql: "UPDATE meeting SET status = ? WHERE audioSystemPath IS NULL AND audioMicPath IS NULL",
+                arguments: [ProcessingStatus.done.rawValue]
+            )
+            try db.alter(table: "meeting") { t in t.drop(column: "kind") }
+
+            try db.alter(table: "note") { t in
+                t.add(column: "tags", .text).notNull().defaults(to: "[]")
+            }
+            try db.execute(sql: "UPDATE note SET tags = json_array(kind)")
+            try db.alter(table: "note") { t in t.drop(column: "kind") }
+
+            // A single embedding per person is replaced by many voiceprints.
+            try db.alter(table: "person") { t in t.drop(column: "voiceEmbedding") }
+            try db.create(table: "voiceprint") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.belongsTo("person", onDelete: .cascade).notNull()
+                t.belongsTo("meeting", onDelete: .setNull)
+                t.column("embedding", .blob).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+
+            try db.alter(table: "meetingSpeaker") { t in
+                t.add(column: "embedding", .blob)
+                t.add(column: "speechMs", .integer).notNull().defaults(to: 0)
+                t.add(column: "lang", .text)
+            }
+            try db.alter(table: "segment") { t in
+                t.add(column: "confidence", .double)
+            }
+        }
+
         return migrator
     }
 
     // MARK: - Meetings
 
     @discardableResult
-    public func startMeeting(title: String, kind: MeetingKind, at date: Date = Date()) throws -> Meeting {
+    public func startMeeting(
+        title: String,
+        tags: [String] = [],
+        source: String? = nil,
+        at date: Date = Date()
+    ) throws -> Meeting {
         try writer.write { db in
-            var meeting = Meeting(startedAt: date, title: title, kind: kind)
+            var meeting = Meeting(startedAt: date, title: title, tags: tags, source: source)
             try meeting.insert(db)
             return meeting
         }
     }
 
+    /// Ends the meeting and queues it for transcription when it has audio.
     public func endMeeting(_ id: Int64, at date: Date = Date()) throws {
         try writer.write { db in
             guard var meeting = try Meeting.fetchOne(db, key: id) else { return }
             meeting.endedAt = date
+            let hasAudio = meeting.audioSystemPath != nil || meeting.audioMicPath != nil
+            meeting.status = hasAudio ? .recorded : .done
             try meeting.update(db)
         }
     }
 
-    public func updateAudioPaths(meetingId: Int64, micPath: String?, systemPath: String?) throws {
+    public func updateAudio(meetingId: Int64, startedAt: Date, micPath: String?, systemPath: String?) throws {
         try writer.write { db in
             guard var meeting = try Meeting.fetchOne(db, key: meetingId) else { return }
+            meeting.audioStartedAt = startedAt
             meeting.audioMicPath = micPath
             meeting.audioSystemPath = systemPath
             try meeting.update(db)
+        }
+    }
+
+    /// The mic can join a recording late (plugged in mid-call).
+    public func updateMicPath(meetingId: Int64, micPath: String) throws {
+        try writer.write { db in
+            guard var meeting = try Meeting.fetchOne(db, key: meetingId) else { return }
+            meeting.audioMicPath = micPath
+            try meeting.update(db)
+        }
+    }
+
+    public func setStatus(_ status: ProcessingStatus, detail: String? = nil, meetingId: Int64) throws {
+        try writer.write { db in
+            guard var meeting = try Meeting.fetchOne(db, key: meetingId) else { return }
+            meeting.status = status
+            meeting.statusDetail = detail
+            try meeting.update(db)
+        }
+    }
+
+    public func renameMeeting(_ id: Int64, title: String) throws {
+        try writer.write { db in
+            guard var meeting = try Meeting.fetchOne(db, key: id) else { return }
+            meeting.title = title
+            meeting.tags = Array(Set(meeting.tags + Tags.parse(title))).sorted()
+            try meeting.update(db)
+        }
+    }
+
+    public func meeting(id: Int64) throws -> Meeting? {
+        try writer.read { db in try Meeting.fetchOne(db, key: id) }
+    }
+
+    /// Ended meetings whose audio still needs transcription, oldest first.
+    /// `processing` is included: it means the app quit mid-run.
+    public func meetingsToProcess() throws -> [Meeting] {
+        try writer.read { db in
+            try Meeting
+                .filter([ProcessingStatus.recorded.rawValue, ProcessingStatus.processing.rawValue]
+                    .contains(Column("status")))
+                .filter(Column("endedAt") != nil)
+                .order(Column("startedAt"))
+                .fetchAll(db)
         }
     }
 
@@ -177,12 +273,16 @@ public final class AppDatabase: Sendable {
     }
 
     @discardableResult
-    public func addNote(meetingId: Int64, tMs: Int, kind: NoteKind, text: String) throws -> Note {
+    public func addNote(meetingId: Int64, tMs: Int, text: String) throws -> Note {
         try writer.write { db in
-            var note = Note(meetingId: meetingId, tMs: tMs, kind: kind, text: text)
+            var note = Note(meetingId: meetingId, tMs: tMs, text: text)
             try note.insert(db)
             return note
         }
+    }
+
+    public func deleteNote(_ id: Int64) throws {
+        try writer.write { db in _ = try Note.deleteOne(db, key: id) }
     }
 
     @discardableResult
@@ -226,6 +326,88 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    // MARK: - Transcript and speakers
+
+    /// Replaces the whole transcript of a meeting atomically, so a re-run of
+    /// the pipeline never leaves a mix of old and new segments.
+    public func saveTranscript(meetingId: Int64, speakers: [MeetingSpeaker], segments: [Segment]) throws {
+        try writer.write { db in
+            // Explicit deletes keep the FTS index in sync (see deleteMeeting).
+            try Segment.filter(Column("meetingId") == meetingId).deleteAll(db)
+            try MeetingSpeaker.filter(Column("meetingId") == meetingId).deleteAll(db)
+            for speaker in speakers {
+                try speaker.insert(db)
+            }
+            for var segment in segments {
+                segment.id = nil
+                try segment.insert(db)
+            }
+            guard var meeting = try Meeting.fetchOne(db, key: meetingId) else { return }
+            meeting.status = .done
+            meeting.statusDetail = nil
+            try meeting.update(db)
+        }
+    }
+
+    public func speakers(meetingId: Int64) throws -> [MeetingSpeaker] {
+        try writer.read { db in
+            try MeetingSpeaker
+                .filter(Column("meetingId") == meetingId)
+                .order(Column("diarCluster"))
+                .fetchAll(db)
+        }
+    }
+
+    public func persons() throws -> [Person] {
+        try writer.read { db in
+            try Person.order(Column("name").collating(.localizedCaseInsensitiveCompare)).fetchAll(db)
+        }
+    }
+
+    public func voiceprints() throws -> [Voiceprint] {
+        try writer.read { db in try Voiceprint.fetchAll(db) }
+    }
+
+    /// Names a voice of a meeting. The person is created when new, every
+    /// segment of that voice is attributed to them, and the voice becomes a
+    /// voiceprint so future meetings recognize them automatically.
+    @discardableResult
+    public func assignSpeaker(meetingId: Int64, diarCluster: Int, personName: String) throws -> Person {
+        let name = personName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try writer.write { db in
+            var person = try Person.filter(Column("name").collating(.nocase) == name).fetchOne(db)
+                ?? Person(name: name, createdAt: Date())
+            if person.id == nil {
+                try person.insert(db)
+            }
+            let personId = person.id!
+            guard var speaker = try MeetingSpeaker
+                .filter(Column("meetingId") == meetingId && Column("diarCluster") == diarCluster)
+                .fetchOne(db) else { return person }
+            speaker.personId = personId
+            try speaker.update(db)
+            try Segment
+                .filter(Column("meetingId") == meetingId && Column("diarCluster") == diarCluster)
+                .updateAll(db, Column("personId").set(to: personId))
+            if let embedding = speaker.embedding {
+                // Re-naming the same voice replaces its voiceprint instead of
+                // piling up duplicates (or a wrong first guess).
+                try Voiceprint
+                    .filter(Column("meetingId") == meetingId)
+                    .filter(Column("embedding") == embedding)
+                    .deleteAll(db)
+                var voiceprint = Voiceprint(
+                    personId: personId,
+                    meetingId: meetingId,
+                    embedding: embedding,
+                    createdAt: Date()
+                )
+                try voiceprint.insert(db)
+            }
+            return person
+        }
+    }
+
     // MARK: - Search
 
     public func searchSegments(_ query: String) throws -> [Segment] {
@@ -259,6 +441,46 @@ public final class AppDatabase: Sendable {
                     """,
                 arguments: [pattern]
             )
+        }
+    }
+
+    /// Speech and notes matching every word of the query (accents ignored),
+    /// newest meeting first.
+    public func search(_ query: String) throws -> [SearchHit] {
+        let meetingsById = Dictionary(uniqueKeysWithValues: try meetings().compactMap { meeting in
+            meeting.id.map { ($0, meeting.startedAt) }
+        })
+        let speech = try searchSegments(query).map { segment in
+            SearchHit(
+                meetingId: segment.meetingId,
+                tMs: segment.tStartMs,
+                text: segment.text,
+                kind: .speech(segment.channel, diarCluster: segment.diarCluster, personId: segment.personId)
+            )
+        }
+        let notes = try searchNotes(query).map { note in
+            SearchHit(meetingId: note.meetingId, tMs: note.tMs, text: note.text, kind: .note)
+        }
+        return (speech + notes).sorted { lhs, rhs in
+            let left = meetingsById[lhs.meetingId] ?? .distantPast
+            let right = meetingsById[rhs.meetingId] ?? .distantPast
+            return left != right ? left > right : lhs.tMs < rhs.tMs
+        }
+    }
+
+    /// Names of the known people heard in each meeting.
+    public func peopleByMeeting() throws -> [Int64: [String]] {
+        try writer.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT DISTINCT meetingSpeaker.meetingId, person.name
+                FROM meetingSpeaker JOIN person ON person.id = meetingSpeaker.personId
+                ORDER BY person.name
+                """)
+            var result: [Int64: [String]] = [:]
+            for row in rows {
+                result[row["meetingId"], default: []].append(row["name"])
+            }
+            return result
         }
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 import KuronekoCore
 import SwiftUI
 
@@ -11,9 +12,33 @@ struct KuronekoApp: App {
         MenuBarExtra {
             MenuContent(state: state)
         } label: {
-            Image(systemName: state.isMeetingActive ? "record.circle.fill" : "cat")
+            Image(systemName: menuIcon)
+        }
+
+        Window("Reuniões", id: WindowID.meetings) {
+            MeetingsView(state: state)
+        }
+        .defaultSize(width: 520, height: 820)
+
+        Settings {
+            SettingsView(state: state)
         }
     }
+
+    private var menuIcon: String {
+        if state.isMeetingActive { return "record.circle.fill" }
+        if state.processing.current != nil { return "waveform" }
+        return "cat"
+    }
+}
+
+enum WindowID {
+    static let meetings = "meetings"
+}
+
+extension KeyboardShortcuts.Name {
+    /// ⌃⌥⌘N by default; never an ⌥+digit chord (taken by AeroSpace).
+    static let quickNote = Self("quickNote", default: .init(.n, modifiers: [.control, .option, .command]))
 }
 
 @MainActor
@@ -22,6 +47,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Menu-bar-only mode even when launched as a bare binary (swift run),
         // where the Info.plist LSUIElement key is not present.
         NSApp.setActivationPolicy(.accessory)
+        CaptureShield.start { AppState.shared.hiddenFromScreenCapture }
+        KeyboardShortcuts.onKeyUp(for: .quickNote) {
+            QuickNoteController.shared.toggle(state: AppState.shared)
+        }
+        AppState.shared.onVoicePrompt { meetingId in
+            VoicePromptController.shared.update(meetingId: meetingId, state: AppState.shared)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -76,6 +76,20 @@ public final class ResamplingWavWriter {
         }
     }
 
+    public func appendSilence(seconds: TimeInterval) throws {
+        guard let file, seconds > 0 else { return }
+        let frames = AVAudioFrameCount(seconds * outputFormat.sampleRate)
+        guard let silence = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frames) else {
+            throw CaptureError.unsupportedFormat("silence buffer allocation")
+        }
+        silence.frameLength = frames
+        // Freshly allocated PCM buffers are not guaranteed to be zeroed.
+        if let samples = silence.int16ChannelData?[0] {
+            samples.update(repeating: 0, count: Int(frames))
+        }
+        try file.write(from: silence)
+    }
+
     /// Releases the underlying AVAudioFile, which is what finalizes the WAV
     /// header on disk. Reading the file before this reports zero frames.
     public func finish() {

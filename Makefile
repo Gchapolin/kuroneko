@@ -18,6 +18,9 @@ bundle: build
 	mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	cp $(BINARY) $(BUNDLE)/Contents/MacOS/$(APP)
 	cp Support/Info.plist $(BUNDLE)/Contents/Info.plist
+	# SwiftPM resource bundles (KeyboardShortcuts strings, FluidAudio, GRDB);
+	# without them the app only works while .build/ exists.
+	cp -R .build/release/*.bundle $(BUNDLE)/Contents/Resources/
 	codesign --force --sign "$(SIGN_IDENTITY)" $(BUNDLE)
 	@echo "Bundle pronto: $(BUNDLE)"
 

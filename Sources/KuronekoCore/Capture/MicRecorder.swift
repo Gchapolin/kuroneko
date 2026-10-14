@@ -5,7 +5,9 @@ import os
 /// Records the user's microphone to 16kHz mono WAV via AVAudioEngine,
 /// independent from the system-audio tap so the "me" channel stays separate.
 public final class MicRecorder: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    /// Recreated per recording: an engine created while no input device
+    /// existed keeps reporting a 0 Hz input even after one is plugged in.
+    private var engine = AVAudioEngine()
     private let lock = NSLock()
     private let logger = Logger(subsystem: "com.gandarfh.kuroneko", category: "MicRecorder")
     private var writer: ResamplingWavWriter?
@@ -17,15 +19,19 @@ public final class MicRecorder: @unchecked Sendable {
         await AVCaptureDevice.requestAccess(for: .audio)
     }
 
-    public func start(fileURL: URL) throws {
+    /// `leadingSilence` pads the start of the file so it lines up with the
+    /// system channel, which may have started earlier.
+    public func start(fileURL: URL, leadingSilence: TimeInterval = 0) throws {
         try lock.withLock {
             guard writer == nil else { throw CaptureError.alreadyRecording }
+            engine = AVAudioEngine()
             let format = engine.inputNode.inputFormat(forBus: 0)
             FileLog.shared.append("mic.start: formato de entrada \(format.sampleRate)Hz \(format.channelCount)ch")
             guard format.sampleRate > 0, format.channelCount > 0 else {
                 throw CaptureError.unsupportedFormat("mic input format indisponível")
             }
             let writer = try ResamplingWavWriter(inputFormat: format, fileURL: fileURL)
+            try writer.appendSilence(seconds: leadingSilence)
             try installTapAndStart(writer: writer)
             self.writer = writer
         }

@@ -66,6 +66,23 @@ import Testing
         #expect(file.length > 2800)
     }
 
+    @Test func padsLeadingSilenceToAlignChannels() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let input = try makeBuffer(sampleRate: 48000, channels: 1, frames: 4800)
+
+        let writer = try ResamplingWavWriter(inputFormat: input.format, fileURL: url)
+        try writer.appendSilence(seconds: 1.5)
+        try writer.append(input)
+
+        writer.finish()
+        let samples = try AudioSamples.load(url)
+        // 0.1 s of input, minus the resampler latency.
+        #expect(samples.count > 24000 + 1000)
+        #expect(samples.prefix(24000).allSatisfy { $0 == 0 })
+        #expect(samples.suffix(1000).contains { $0 != 0 })
+    }
+
     @Test func ignoresEmptyBuffers() throws {
         let url = tempWavURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -132,10 +149,11 @@ import Testing
 @Suite struct AudioPathsTests {
     @Test func updateAudioPathsPersistsBothChannels() throws {
         let db = try AppDatabase.inMemory()
-        let meeting = try db.startMeeting(title: "Daily", kind: .daily)
+        let meeting = try db.startMeeting(title: "Daily")
 
-        try db.updateAudioPaths(
+        try db.updateAudio(
             meetingId: meeting.id!,
+            startedAt: Date(),
             micPath: "/tmp/kuroneko/meetings/1/mic.wav",
             systemPath: "/tmp/kuroneko/meetings/1/system.wav"
         )

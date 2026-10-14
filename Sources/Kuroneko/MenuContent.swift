@@ -1,9 +1,12 @@
 import AppKit
+import KeyboardShortcuts
 import KuronekoCore
 import SwiftUI
 
 struct MenuContent: View {
     let state: AppState
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         if let meeting = state.activeMeeting {
@@ -12,16 +15,28 @@ struct MenuContent: View {
             if state.startedAutomatically {
                 Text("Encerra sozinha quando você sair da chamada")
             }
+            Button("Nova nota…") {
+                QuickNoteController.shared.show(state: state)
+            }
+            .globalKeyboardShortcut(.quickNote)
             Button("Encerrar reunião") {
                 state.endActiveMeeting()
             }
         } else {
-            Menu("Iniciar reunião") {
-                ForEach(MeetingKind.allCases, id: \.self) { kind in
-                    Button(kind.label) {
-                        state.startMeeting(kind: kind)
-                    }
-                }
+            Button("Iniciar reunião") {
+                state.startMeeting()
+            }
+        }
+
+        if let current = state.processing.current {
+            Divider()
+            Text("Transcrevendo “\(current.title)”… \(Int(current.progress * 100))%")
+        }
+
+        if state.hasVoicesToName, !state.isMeetingActive {
+            Divider()
+            Button("Dizer quem falou…") {
+                state.showVoicePromptNow()
             }
         }
 
@@ -31,19 +46,22 @@ struct MenuContent: View {
         }
 
         Divider()
-        Toggle("Gravar chamadas do Meet automaticamente", isOn: Binding(
-            get: { state.autoRecord },
-            set: { state.setAutoRecord($0) }
-        ))
-        Toggle("Abrir ao iniciar sessão", isOn: Binding(
-            get: { state.launchAtLogin },
-            set: { state.setLaunchAtLogin($0) }
-        ))
+        Button("Abrir reuniões…") {
+            openWindow(id: WindowID.meetings)
+            NSApp.activate()
+        }
+        .keyboardShortcut("o")
+        Button("Ajustes…") {
+            openSettings()
+            NSApp.activate()
+        }
+        .keyboardShortcut(",")
 
         Divider()
         Button("Sair") {
             NSApp.terminate(nil)
         }
+        .keyboardShortcut("q")
     }
 
     private var recordingStatus: String {

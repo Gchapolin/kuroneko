@@ -2,28 +2,33 @@
 
 ## Overview
 
-App de menu bar 100% local para gravar reuniões do Google Meet (Chrome), transcrever ao vivo (pt-BR + espanhol), diarizar falantes e guardar notas/screenshots vinculados à timeline. Nome em homenagem ao gato do João.
+App de menu bar 100% local que grava sozinho as chamadas do Google Meet (Chrome), transcreve depois da call em background (pt-BR, espanhol UY/CL e inglês), separa e reconhece as vozes, e guarda notas pessoais na linha do tempo. Nada é transcrito ao vivo: a prioridade é precisão no que foi dito e em quem disse. Nome em homenagem ao gato do João.
 
 ## Tech Stack
 
 - **Language**: Swift 6 (SPM puro, sem .xcodeproj — bundle montado pelo Makefile)
 - **UI**: SwiftUI (MenuBarExtra, menu-bar-only app)
 - **Database**: SQLite via GRDB 7 + FTS5
-- **Audio**: Core Audio Process Taps (Chrome) + AVAudioEngine (mic), canais separados
-- **ML local**: WhisperKit large-v3-turbo (ASR), FluidAudio (diarização) — inferência 100% local
+- **Audio**: Core Audio Process Taps (Chrome) + AVAudioEngine (mic), canais separados e alinhados no mesmo zero
+- **ML local**: WhisperKit (pacote `argmax-oss-swift`) large-v3-turbo para ASR; FluidAudio `OfflineDiarizerManager` (pyannote community-1) para diarização e Silero VAD para detecção de fala — inferência 100% local, modelos em `~/Library/Application Support/Kuroneko/models`
 - **Testing**: Swift Testing (`swift test`)
-- **Hotkeys**: KeyboardShortcuts (sindresorhus)
+- **Hotkeys**: KeyboardShortcuts (sindresorhus), nota rápida em ⌃⌥⌘N
 
 ## Architecture
 
 ```
 Sources/
 ├── KuronekoCore/        # lógica sem UI, testável
+│   ├── Capture/         # tap do Chrome, mic, detecção da call (abas + saída de áudio)
+│   ├── Processing/      # pipeline pós-call: diarização, VAD, eco, idioma, ASR, vozes conhecidas
+│   ├── Review/          # timeline, agrupamento por semana, busca
 │   └── Store/           # AppDatabase (GRDB), Models, migrations, FTS5
-├── Kuroneko/            # executável: MenuBarExtra, AppState (@Observable)
+├── Kuroneko/            # executável: MenuBarExtra, janela de reuniões, nota rápida, ajustes
 Support/Info.plist       # LSUIElement + usage descriptions (TCC)
 Makefile                 # build | test | bundle | run | clean
 ```
+
+Pipeline (`MeetingProcessor`): sistema → diarização + VAD (VAD recupera falas curtas que o diarizador perde) → mic → VAD menos eco (`EchoGate`, usa system.wav como referência) → idioma por enunciado entre pt/es/en → turnos de mesma voz e mesmo idioma → Whisper por turno com vocabulário no prompt → `HallucinationFilter` → vozes casadas com voiceprints.
 
 Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca importa SwiftUI/AppKit. Lógica nova vai no core com testes; a UI é casca fina.
 
@@ -33,6 +38,7 @@ Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca i
 - Colunas SQLite em camelCase espelhando as propriedades dos records (convenção GRDB)
 - Strings de UI em português (com acentos); identificadores e código em inglês
 - Erros: nunca engolir silenciosamente — logar via os.Logger e refletir em `AppState.lastError`
+- Nenhuma janela do Kuroneko aparece em compartilhamento/gravação de tela (`CaptureShield`, ligado por padrão): janelas que o app mostra por conta própria chamam `CaptureShield.protect` antes de aparecer; o resto é coberto pela varredura
 
 ## Testing Rules
 
@@ -50,15 +56,22 @@ Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca i
 ## Build
 
 - `make test` — roda os testes
-- `make run` — monta `dist/Kuroneko.app` (Info.plist + codesign ad-hoc) e abre
+- `make run` — monta `dist/Kuroneko.app` (Info.plist + bundles de recursos do SwiftPM + codesign com o certificado "Apple Development") e abre
 - O process tap de áudio exige rodar via bundle assinado, não via `swift run`
+- Assinatura ad-hoc faz o macOS esquecer as permissões (mic, áudio do sistema, Automação) a cada build — manter o certificado estável
+- Teste com os modelos reais (opcional, ~2 GB): `KURONEKO_E2E_AUDIO=/caminho/system.wav swift test --filter EndToEnd`
+- Benchmark de diarização e reconhecimento de vozes em reuniões reais do corpus AMI: `KURONEKO_AMI=/pasta swift test --filter DiarizationBenchmark` (instruções no teste; baseline 98%/98%)
+- Vozes sintéticas do `say` não servem para testar diarização: o modelo funde vozes do macOS que soam parecidas
 
 ## Current Focus
 
-Fase 1 (esqueleto + storage) concluída em desenvolvimento. Próximas fases: captura de áudio (mic + tap Chrome), transcrição ao vivo, notas/screenshots, diarização, consulta. Plano completo: `~/.claude/plans/golden-doodling-frost.md`.
+Captura automática do Meet, pipeline de transcrição, revisão (janela de reuniões, nomear vozes, ouvir trechos), nota rápida e busca prontos (out/2026). Ao fim de cada transcrição com vozes sem nome aparece um cartão flutuante (`VoicePrompt`) com as pessoas conhecidas da voz mais parecida para a menos (`VoiceReview`); some sozinho em 10s sem interação e fica no menu do gato ("Dizer quem falou…"). `SpeakerMatcher.threshold` (0.55) validado no AMI: mesma pessoa 0.92–0.97, pessoas diferentes ≤ 0.32. Pendentes: calibrar `EchoGate` com mic real (o log registra o eco descartado), calls muito curtas (1–2 min) podem juntar vozes (há o `@Nome` como fallback), resumo semanal (decidir LLM local ou não), huddle do Slack.
 
 ## Known Issues
 
+- WhisperKit não implementa `noSpeechProb` (sempre 0) e `detectLangauge` só devolve o idioma vencedor: a proteção contra alucinação é VAD + `HallucinationFilter`, e as pontuações de pt/es/en vêm de um `TokenSampling` próprio (`LanguageScoreSampler`)
+- Espanhol com sotaque brasileiro é detectado como pt (pt 0.77 / es 0.15): enunciados com idioma duvidoso são transcritos isolados para o Whisper não "traduzir" o trecho
+- Meet: URL e título da aba continuam iguais depois de sair da call; o fim da call é detectado pela saída de áudio do Chrome
 - Deleção de reunião apaga filhos explicitamente (não confia no FK cascade) para os triggers de sincronização do FTS5 dispararem — manter esse padrão em novas tabelas indexadas.
 
 ## Do NOT
