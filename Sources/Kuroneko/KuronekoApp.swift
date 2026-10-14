@@ -12,7 +12,7 @@ struct KuronekoApp: App {
         MenuBarExtra {
             MenuContent(state: state)
         } label: {
-            Image(systemName: menuIcon)
+            menuIcon
         }
 
         Window("Reuniões", id: WindowID.meetings) {
@@ -25,10 +25,12 @@ struct KuronekoApp: App {
         }
     }
 
-    private var menuIcon: String {
-        if state.isMeetingActive { return "record.circle.fill" }
-        if state.processing.current != nil { return "waveform" }
-        return "cat"
+    private var menuIcon: Image {
+        if state.isMeetingActive { return Image(systemName: "record.circle.fill") }
+        if state.processing.current != nil { return Image(systemName: "waveform") }
+        // A dot beside the cat: a summary is ready (see "Novidades").
+        if state.hasNews { return Image(nsImage: MenuBarIcon.catWithNews) }
+        return Image(systemName: "cat")
     }
 }
 
