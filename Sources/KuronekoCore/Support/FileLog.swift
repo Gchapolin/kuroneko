@@ -3,7 +3,16 @@ import Foundation
 /// Append-only diagnostic log in Application Support, readable without the
 /// unified log (os_log entries are not accessible from sandboxed tooling).
 public final class FileLog: @unchecked Sendable {
-    public static let shared = FileLog(url: MeetingStorage.standard().root.appendingPathComponent("kuroneko.log"))
+    public static let shared = FileLog(url: defaultURL)
+
+    /// Tests run the real pipeline too: they log to a temporary file, never
+    /// into the user's.
+    static var defaultURL: URL {
+        if ["swiftpm-testing-helper", "xctest"].contains(ProcessInfo.processInfo.processName) {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("kuroneko-tests.log")
+        }
+        return MeetingStorage.standard().root.appendingPathComponent("kuroneko.log")
+    }
 
     public let url: URL
     private let queue = DispatchQueue(label: "com.gandarfh.kuroneko.filelog")

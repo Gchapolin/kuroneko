@@ -21,4 +21,8 @@ import Testing
         // Every line starts with an ISO8601 timestamp.
         #expect(lines.allSatisfy { $0.contains("T") && $0.contains("Z") })
     }
+
+    @Test func testsNeverWriteIntoTheUsersLog() {
+        #expect(FileLog.shared.url.path.hasPrefix(FileManager.default.temporaryDirectory.path))
+    }
 }
