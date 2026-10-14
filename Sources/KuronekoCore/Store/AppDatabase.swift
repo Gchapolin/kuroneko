@@ -794,6 +794,28 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// Finished meetings where nothing was said, written or attached — a
+    /// call joined by mistake, a test — which the list keeps out of sight.
+    public func silentMeetingIds() throws -> Set<Int64> {
+        try writer.read { db in
+            Set(try Int64.fetchAll(db, sql: """
+                SELECT id FROM meeting
+                WHERE status = ?
+                  AND NOT EXISTS (SELECT 1 FROM segment WHERE segment.meetingId = meeting.id)
+                  AND NOT EXISTS (SELECT 1 FROM note WHERE note.meetingId = meeting.id)
+                  AND NOT EXISTS (SELECT 1 FROM meetingDocument WHERE meetingDocument.meetingId = meeting.id)
+                  AND NOT EXISTS (SELECT 1 FROM meetingLink WHERE meetingLink.meetingId = meeting.id)
+                """, arguments: [ProcessingStatus.done.rawValue]))
+        }
+    }
+
+    /// How far into the recording the transcript goes; nil before any text.
+    public func transcribedUntilMs(meetingId: Int64) throws -> Int? {
+        try writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT max(tEndMs) FROM segment WHERE meetingId = ?", arguments: [meetingId])
+        }
+    }
+
     public func attachmentCounts() throws -> [Int64: Int] {
         try writer.read { db in
             let rows = try Row.fetchAll(db, sql: """
