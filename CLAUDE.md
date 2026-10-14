@@ -45,6 +45,8 @@ Pendências: o resumo em Markdown é a fonte da verdade (o usuário edita no Neo
 
 Notas com prints: tabela `attachment` (nota, tipo livre, caminho relativo à pasta da reunião, em `meetings/<id>/attachments/`); `addNote(…, attachments:)` move a captura para lá, e a nota pode ficar sem texto. Links por reunião em `meetingLink`, com rótulo curto quando não têm título (`LinkLabel`: "PR #482", "ABC-123", host/último trecho). `AppDatabase` conhece o `MeetingStorage` para resolver esses caminhos e apagar os arquivos junto com as linhas.
 
+Telas (`Sources/Kuroneko`): janela de reuniões com abas Reuniões | Pendências (`MeetingsView`, `MeetingCard`, `TasksView`; cartões por dia via `DayGrouping`, gravações sem fala escondidas); tela da reunião (`MeetingDetailView` + `MeetingHeaderView`, `MeetingOverviewView` com resumo/pendências/decisões/notas sempre abertos, `MeetingTranscriptView` que acompanha o áudio, `MeetingBottomBar` com player ±15 s/velocidade e nota no ponto que está tocando; espaço, ←/→, ⌘N, ⌘F); nota rápida (`QuickNote`: ⌘⌘ por `CommandDoubleTap`, um event tap só de escuta — precisa de "Monitoramento de Entrada" e olha só quando há teclas, nunca quais; ⌃⌥⌘N continua sem permissão; ⌘1 janela do app da frente, ⌘2 tela sob o mouse, ⌘3 área, rascunho em `NoteDraft`; prints precisam de "Gravação de Tela"). Menu do gato com "Novidades" e ponto no ícone (`MenuBarIcon`); `Navigator` leva o menu a uma reunião ou às pendências.
+
 ## Coding Conventions
 
 - camelCase para variáveis/funções, PascalCase para tipos
