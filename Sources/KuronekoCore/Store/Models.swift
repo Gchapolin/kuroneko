@@ -248,6 +248,35 @@ extension Note: FetchableRecord, MutablePersistableRecord {
     }
 }
 
+/// A text about a whole meeting, such as its summary. `kind` is free-form
+/// ("summary", "minutes"), at most one per meeting.
+public struct MeetingDocument: Codable, Identifiable, Equatable, Sendable {
+    public var id: Int64?
+    public var meetingId: Int64
+    public var kind: String
+    public var body: String
+    /// What wrote it ("claude", "manual").
+    public var source: String?
+    public var updatedAt: Date
+
+    public init(id: Int64? = nil, meetingId: Int64, kind: String, body: String, source: String?, updatedAt: Date) {
+        self.id = id
+        self.meetingId = meetingId
+        self.kind = kind
+        self.body = body
+        self.source = source
+        self.updatedAt = updatedAt
+    }
+}
+
+extension MeetingDocument: FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "meetingDocument"
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
 public struct Screenshot: Codable, Identifiable, Equatable, Sendable {
     public var id: Int64?
     public var meetingId: Int64

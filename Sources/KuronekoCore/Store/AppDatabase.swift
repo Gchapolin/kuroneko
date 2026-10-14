@@ -14,7 +14,11 @@ public final class AppDatabase: Sendable {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        return try AppDatabase(DatabaseQueue(path: url.path))
+        // The app and the `kuroneko` command write to the same file; a
+        // writer waits for the other instead of failing with SQLITE_BUSY.
+        var configuration = Configuration()
+        configuration.busyMode = .timeout(5)
+        return try AppDatabase(DatabaseQueue(path: url.path, configuration: configuration))
     }
 
     public static func inMemory() throws -> AppDatabase {
@@ -134,6 +138,20 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v3") { db in
+            // Texts about a whole meeting (a summary, minutes); the kind is
+            // free-form, one text per kind.
+            try db.create(table: "meetingDocument") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.belongsTo("meeting", onDelete: .cascade).notNull()
+                t.column("kind", .text).notNull()
+                t.column("body", .text).notNull()
+                t.column("source", .text)
+                t.column("updatedAt", .datetime).notNull()
+                t.uniqueKey(["meetingId", "kind"])
+            }
+        }
+
         return migrator
     }
 
@@ -243,6 +261,7 @@ public final class AppDatabase: Sendable {
             try Note.filter(Column("meetingId") == id).deleteAll(db)
             try Screenshot.filter(Column("meetingId") == id).deleteAll(db)
             try MeetingSpeaker.filter(Column("meetingId") == id).deleteAll(db)
+            try MeetingDocument.filter(Column("meetingId") == id).deleteAll(db)
             _ = try Meeting.deleteOne(db, key: id)
         }
     }
@@ -283,6 +302,40 @@ public final class AppDatabase: Sendable {
 
     public func deleteNote(_ id: Int64) throws {
         try writer.write { db in _ = try Note.deleteOne(db, key: id) }
+    }
+
+    public func note(id: Int64) throws -> Note? {
+        try writer.read { db in try Note.fetchOne(db, key: id) }
+    }
+
+    // MARK: - Documents
+
+    public func documents(meetingId: Int64) throws -> [MeetingDocument] {
+        try writer.read { db in
+            try MeetingDocument.filter(Column("meetingId") == meetingId).order(Column("kind")).fetchAll(db)
+        }
+    }
+
+    /// Creates or replaces the meeting's text of that kind.
+    @discardableResult
+    public func setDocument(meetingId: Int64, kind: String, body: String, source: String?, at date: Date = Date()) throws -> MeetingDocument {
+        try writer.write { db in
+            var document = try MeetingDocument
+                .filter(Column("meetingId") == meetingId && Column("kind") == kind)
+                .fetchOne(db)
+                ?? MeetingDocument(meetingId: meetingId, kind: kind, body: body, source: source, updatedAt: date)
+            document.body = body
+            document.source = source
+            document.updatedAt = date
+            try document.save(db)
+            return document
+        }
+    }
+
+    public func deleteDocument(meetingId: Int64, kind: String) throws {
+        try writer.write { db in
+            _ = try MeetingDocument.filter(Column("meetingId") == meetingId && Column("kind") == kind).deleteAll(db)
+        }
     }
 
     @discardableResult
@@ -469,6 +522,24 @@ public final class AppDatabase: Sendable {
     }
 
     /// Names of the known people heard in each meeting.
+    public func noteCounts() throws -> [Int64: Int] {
+        try writer.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT meetingId, count(*) AS n FROM note GROUP BY meetingId")
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0["meetingId"], $0["n"]) })
+        }
+    }
+
+    public func documentKinds() throws -> [Int64: [String]] {
+        try writer.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT meetingId, kind FROM meetingDocument ORDER BY kind")
+            var result: [Int64: [String]] = [:]
+            for row in rows {
+                result[row["meetingId"], default: []].append(row["kind"])
+            }
+            return result
+        }
+    }
+
     public func peopleByMeeting() throws -> [Int64: [String]] {
         try writer.read { db in
             let rows = try Row.fetchAll(db, sql: """

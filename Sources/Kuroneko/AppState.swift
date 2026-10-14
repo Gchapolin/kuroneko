@@ -27,6 +27,7 @@ final class AppState {
     private var voicePrompts = VoicePromptSchedule()
     @ObservationIgnored private var voicePromptHandler: (Int64?) -> Void = { _ in }
     @ObservationIgnored private var promptedMeetingId: Int64?
+    @ObservationIgnored private var externalChanges: NSObjectProtocol?
     private let tabReader = ChromeTabReader()
     private var lastChromeState: String?
     private var lastTabError: ChromeTabsError?
@@ -59,6 +60,14 @@ final class AppState {
         processing.onTranscribed = { [weak self] id in self?.askAboutVoices(of: id) }
         capture.onLateMicStart = { [weak self] url in
             Task { @MainActor in self?.lateMicStarted(url) }
+        }
+        // Names, notes and summaries changed through the `kuroneko` command.
+        externalChanges = DistributedNotificationCenter.default().addObserver(
+            forName: ExternalChange.notification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dataChangedElsewhere() }
         }
         closeStaleMeeting()
         startMonitor()
@@ -177,6 +186,13 @@ final class AppState {
     func showVoicePromptNow() {
         voicePrompts.resume()
         updateVoicePrompt()
+    }
+
+    private func dataChangedElsewhere() {
+        dataVersion += 1
+        for meetingId in voicePrompts.meetingIds {
+            settleVoicePrompt(meetingId)
+        }
     }
 
     private func askAboutVoices(of meetingId: Int64) {

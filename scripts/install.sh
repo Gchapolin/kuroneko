@@ -8,6 +8,7 @@
 # ~/Library/Application Support/Kuroneko and are never touched.
 #
 #   KURONEKO_INSTALL_DIR   where the app goes (default /Applications)
+#   KURONEKO_BIN_DIR       where the `kuroneko` command is linked (default ~/.local/bin)
 #   KURONEKO_SIGN_IDENTITY certificate to sign with (default "Apple Development")
 #   KURONEKO_FORCE=1       reinstall the same version / update mid-recording
 set -eu
@@ -20,6 +21,8 @@ SIGN_IDENTITY="${KURONEKO_SIGN_IDENTITY:-Apple Development}"
 FORCE="${KURONEKO_FORCE:-}"
 DATABASE="$HOME/Library/Application Support/Kuroneko/kuroneko.sqlite"
 TARGET="${INSTALL_DIR}/${APP}.app"
+BIN_DIR="${KURONEKO_BIN_DIR:-$HOME/.local/bin}"
+CLI="Contents/Helpers/kuroneko"
 
 fail() {
   echo "erro: $*" >&2
@@ -87,6 +90,10 @@ app="${workdir}/app/${APP}.app"
 # the app is re-signed with the user's own certificate: then each update
 # keeps the permissions already granted.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"${SIGN_IDENTITY}"; then
+  # Nested code first, then the bundle that seals it.
+  if [ -f "${app}/${CLI}" ]; then
+    codesign --force --sign "$SIGN_IDENTITY" --identifier com.gandarfh.kuroneko.cli "${app}/${CLI}"
+  fi
   codesign --force --sign "$SIGN_IDENTITY" "$app"
 else
   echo "aviso: certificado \"${SIGN_IDENTITY}\" não encontrado; o macOS vai pedir as permissões de novo a cada atualização" >&2
@@ -117,5 +124,16 @@ if [ -n "$installed" ]; then
   echo "Kuroneko atualizado de ${installed} para ${version} em ${TARGET}."
 else
   echo "Kuroneko ${version} instalado em ${TARGET}."
+fi
+
+# A link, not a copy: each update brings the matching command along.
+if [ -x "${TARGET}/${CLI}" ]; then
+  mkdir -p "$BIN_DIR"
+  ln -sf "${TARGET}/${CLI}" "${BIN_DIR}/kuroneko"
+  echo "Comando kuroneko em ${BIN_DIR}/kuroneko"
+  case ":$PATH:" in
+    *":${BIN_DIR}:"*) ;;
+    *) echo "aviso: ${BIN_DIR} não está no PATH; adicione com: export PATH=\"${BIN_DIR}:\$PATH\"" ;;
+  esac
 fi
 open "$TARGET"

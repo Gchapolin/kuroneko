@@ -23,6 +23,11 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
+        // The `kuroneko` command, shipped inside the app bundle.
+        .executableTarget(
+            name: "KuronekoCLI",
+            dependencies: ["KuronekoCore"]
+        ),
         .executableTarget(
             name: "Kuroneko",
             dependencies: [

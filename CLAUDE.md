@@ -22,7 +22,9 @@ Sources/
 │   ├── Capture/         # tap do Chrome, mic, detecção da call (abas + saída de áudio)
 │   ├── Processing/      # pipeline pós-call: diarização, VAD, eco, idioma, ASR, vozes conhecidas
 │   ├── Review/          # timeline, agrupamento por semana, busca
+│   ├── API/             # contrato JSON (MeetingExport), transcrição em Markdown, parser do `kuroneko`
 │   └── Store/           # AppDatabase (GRDB), Models, migrations, FTS5
+├── KuronekoCLI/         # executável `kuroneko` (vai em Contents/Helpers do app): JSON para editores, scripts e Claude
 ├── Kuroneko/            # executável: MenuBarExtra, janela de reuniões, nota rápida, ajustes
 Support/Info.plist       # LSUIElement + usage descriptions (TCC)
 Makefile                 # build | test | bundle | run | clean
@@ -31,6 +33,8 @@ Makefile                 # build | test | bundle | run | clean
 Pipeline (`MeetingProcessor`): sistema → diarização + VAD (VAD recupera falas curtas que o diarizador perde) → mic → VAD menos eco (`EchoGate`, usa system.wav como referência) → idioma por enunciado entre pt/es/en → turnos de mesma voz e mesmo idioma → Whisper por turno com vocabulário no prompt → `HallucinationFilter` → vozes casadas com voiceprints.
 
 Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca importa SwiftUI/AppKit. Lógica nova vai no core com testes; a UI é casca fina.
+
+Integrações (Neovim em `gandarfh/kuroneko.nvim`, IDEs, web local) falam só com o comando `kuroneko`, nunca com o SQLite: o JSON de `MeetingExport`/`MeetingListItem` é o contrato — mudanças nele são breaking para os clientes. O comando avisa o app por `ExternalChange` (notificação distribuída) e o app recarrega. Resumos: `kuroneko summarize` roda `claude -p` (texto da reunião sai do Mac só nesse momento) e guarda em `meetingDocument` (tipo livre, um por tipo).
 
 ## Coding Conventions
 
