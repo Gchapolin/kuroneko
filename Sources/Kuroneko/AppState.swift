@@ -204,6 +204,19 @@ final class AppState {
         enqueueSummary(meetingId, automatic: false)
     }
 
+    /// The summary (or another text of the meeting) as the user edited it;
+    /// empty removes it.
+    func saveDocument(_ body: String, kind: String, meetingId: Int64) {
+        let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        perform("salvar o texto da reunião") {
+            if body.isEmpty {
+                try db.deleteDocument(meetingId: meetingId, kind: kind)
+            } else {
+                try db.setDocument(meetingId: meetingId, kind: kind, body: body, source: "manual")
+            }
+        }
+    }
+
     /// The user opened the meeting.
     func markNewsSeen(_ meetingId: Int64) {
         guard meetingsWithNews.contains(where: { $0.id == meetingId }) else { return }
