@@ -25,7 +25,9 @@ public enum TranscriptText {
             let time = ClockTime.format(ms: entry.startMs)
             if entry.type == "note" {
                 let at = entry.at.map { " (às \(clock($0, timeZone: timeZone)))" } ?? ""
-                lines.append("[\(time)] NOTA\(at): \(entry.text)")
+                let files = (entry.attachments ?? []).map { $0.kind == "image" ? "[print]" : "[arquivo]" }
+                let text = ([entry.text] + files).filter { !$0.isEmpty }.joined(separator: " ")
+                lines.append("[\(time)] NOTA\(at): \(text)")
             } else {
                 lines.append("[\(time)] \(entry.name ?? "?"): \(entry.text)")
             }

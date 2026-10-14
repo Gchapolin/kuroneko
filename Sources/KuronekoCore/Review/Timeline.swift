@@ -4,19 +4,20 @@ import Foundation
 /// per speaker, with the user's notes placed where they were taken.
 public enum TimelineEntry: Equatable, Sendable, Identifiable {
     case speech(SpeechBlock)
-    case note(Note)
+    /// A note with the files attached to it (prints).
+    case note(Note, attachments: [NoteAttachment])
 
     public var id: String {
         switch self {
         case .speech(let block): "s\(block.segments.first?.id ?? 0)-\(block.startMs)"
-        case .note(let note): "n\(note.id ?? 0)-\(note.tMs)"
+        case .note(let note, _): "n\(note.id ?? 0)-\(note.tMs)"
         }
     }
 
     public var startMs: Int {
         switch self {
         case .speech(let block): block.startMs
-        case .note(let note): note.tMs
+        case .note(let note, _): note.tMs
         }
     }
 }
@@ -37,7 +38,12 @@ public struct SpeechBlock: Equatable, Sendable {
 public enum Timeline {
     /// Consecutive segments of one speaker form a block until someone else
     /// speaks or the speaker pauses for longer than `maxPauseMs`.
-    public static func entries(segments: [Segment], notes: [Note], maxPauseMs: Int = 4000) -> [TimelineEntry] {
+    public static func entries(
+        segments: [Segment],
+        notes: [Note],
+        attachments: [NoteAttachment] = [],
+        maxPauseMs: Int = 4000
+    ) -> [TimelineEntry] {
         var blocks: [SpeechBlock] = []
         for segment in segments.sorted(by: { $0.tStartMs < $1.tStartMs }) {
             let key = SpeechBlock.key(for: segment)
@@ -49,7 +55,8 @@ public enum Timeline {
             }
         }
         let speech = blocks.map(TimelineEntry.speech)
-        let placed = notes.map(TimelineEntry.note)
+        let files = Dictionary(grouping: attachments, by: \.noteId)
+        let placed = notes.map { note in TimelineEntry.note(note, attachments: note.id.flatMap { files[$0] } ?? []) }
         // A note taken mid-block goes after that block, not inside it.
         return (speech + placed).sorted { lhs, rhs in
             if lhs.startMs != rhs.startMs { return lhs.startMs < rhs.startMs }

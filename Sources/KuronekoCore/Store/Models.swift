@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import UniformTypeIdentifiers
 
 public enum SegmentChannel: String, Codable, Sendable {
     case mic
@@ -274,6 +275,52 @@ extension MeetingDocument: FetchableRecord, MutablePersistableRecord {
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
         id = inserted.rowID
+    }
+}
+
+/// A file attached to a note, such as a print of the screen. `kind` is
+/// free-form ("image", "file"); `path` is relative to the meeting directory.
+public struct Attachment: Codable, Identifiable, Equatable, Sendable {
+    public var id: Int64?
+    public var noteId: Int64
+    public var kind: String
+    public var path: String
+    public var createdAt: Date
+
+    public init(id: Int64? = nil, noteId: Int64, kind: String, path: String, createdAt: Date) {
+        self.id = id
+        self.noteId = noteId
+        self.kind = kind
+        self.path = path
+        self.createdAt = createdAt
+    }
+
+    /// "image" for pictures, "file" for anything else.
+    public static func kind(of file: URL) -> String {
+        UTType(filenameExtension: file.pathExtension)?.conforms(to: .image) == true ? "image" : "file"
+    }
+}
+
+extension Attachment: FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "attachment"
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
+/// An attachment where the app and clients find it on disk.
+public struct NoteAttachment: Equatable, Sendable, Identifiable {
+    public var id: Int64
+    public var noteId: Int64
+    public var kind: String
+    public var url: URL
+
+    public init(id: Int64, noteId: Int64, kind: String, url: URL) {
+        self.id = id
+        self.noteId = noteId
+        self.kind = kind
+        self.url = url
     }
 }
 

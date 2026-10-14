@@ -14,7 +14,7 @@ struct KuronekoCommand {
                 return
             }
             let storage = MeetingStorage.standard()
-            let db = try AppDatabase.open(at: storage.databaseURL)
+            let db = try AppDatabase.open(storage)
             try await run(command, db: db)
         } catch let error as CLIError {
             fail(error.description, code: 2)

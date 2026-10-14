@@ -190,7 +190,7 @@ struct MeetingDetailView: View {
                 Text(text(of: block)).textSelection(.enabled)
             }
             .padding(.vertical, 2)
-        case .note(let note):
+        case .note(let note, _):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "note.text").foregroundStyle(.yellow)
                 VStack(alignment: .leading, spacing: 4) {

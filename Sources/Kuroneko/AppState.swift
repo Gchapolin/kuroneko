@@ -79,7 +79,7 @@ final class AppState {
     static func live() -> AppState {
         let storage = MeetingStorage.standard()
         do {
-            return AppState(db: try AppDatabase.open(at: storage.databaseURL), storage: storage)
+            return AppState(db: try AppDatabase.open(storage), storage: storage)
         } catch {
             fatalError("Não foi possível abrir o banco em \(storage.databaseURL.path): \(error)")
         }
@@ -105,15 +105,19 @@ final class AppState {
 
     /// A note on the meeting being recorded, placed at `date`: when the
     /// user started writing it, closest to what prompted it.
-    func addNoteToActiveMeeting(_ text: String, at date: Date) {
+    func addNoteToActiveMeeting(_ text: String, at date: Date, attachments: [URL] = []) {
         guard let meeting = activeMeeting, let id = meeting.id else { return }
-        addNote(text, meetingId: id, atMs: meeting.audioOffsetMs(at: date))
+        addNote(text, meetingId: id, atMs: meeting.audioOffsetMs(at: date), attachments: attachments)
     }
 
-    func addNote(_ text: String, meetingId: Int64, atMs tMs: Int) {
+    /// `attachments` are files to move into the meeting (prints); with at
+    /// least one, the text may be empty.
+    func addNote(_ text: String, meetingId: Int64, atMs tMs: Int, attachments: [URL] = []) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        perform("salvar a nota") { try db.addNote(meetingId: meetingId, tMs: tMs, text: text) }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        perform("salvar a nota") {
+            try db.addNote(meetingId: meetingId, tMs: tMs, text: text, attachments: attachments)
+        }
     }
 
     func deleteNote(_ id: Int64) {
@@ -145,10 +149,7 @@ final class AppState {
     }
 
     func deleteMeeting(_ id: Int64) {
-        perform("apagar a reunião") {
-            try db.deleteMeeting(id)
-            try? FileManager.default.removeItem(at: storage.meetingDirectory(id: id))
-        }
+        perform("apagar a reunião") { try db.deleteMeeting(id) }
         voicePrompts.remove(id)
         updateVoicePrompt()
     }

@@ -13,6 +13,12 @@ public struct MeetingStorage: Equatable, Sendable {
         return MeetingStorage(root: support.appendingPathComponent("Kuroneko", isDirectory: true))
     }
 
+    /// A fresh folder under the temporary directory, for in-memory databases.
+    public static func temporary() -> MeetingStorage {
+        MeetingStorage(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("kuroneko-\(UUID().uuidString)", isDirectory: true))
+    }
+
     public var databaseURL: URL {
         root.appendingPathComponent("kuroneko.sqlite")
     }
@@ -36,5 +42,15 @@ public struct MeetingStorage: Equatable, Sendable {
 
     public func screenshotsDirectory(meetingId: Int64) -> URL {
         meetingDirectory(id: meetingId).appendingPathComponent("screenshots", isDirectory: true)
+    }
+
+    /// Files attached to the meeting's notes: `meetings/<id>/attachments/`.
+    public func attachmentsDirectory(meetingId: Int64) -> URL {
+        meetingDirectory(id: meetingId).appendingPathComponent("attachments", isDirectory: true)
+    }
+
+    /// A file of the meeting from its path relative to the meeting directory.
+    public func file(meetingId: Int64, path: String) -> URL {
+        meetingDirectory(id: meetingId).appendingPathComponent(path)
     }
 }

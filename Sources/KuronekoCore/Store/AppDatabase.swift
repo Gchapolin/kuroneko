@@ -3,13 +3,17 @@ import GRDB
 
 public final class AppDatabase: Sendable {
     private let writer: any DatabaseWriter
+    /// Where the files some rows point to live (attachments, audio).
+    public let storage: MeetingStorage
 
-    public init(_ writer: any DatabaseWriter) throws {
+    public init(_ writer: any DatabaseWriter, storage: MeetingStorage) throws {
         self.writer = writer
+        self.storage = storage
         try Self.migrator.migrate(writer)
     }
 
-    public static func open(at url: URL) throws -> AppDatabase {
+    public static func open(_ storage: MeetingStorage) throws -> AppDatabase {
+        let url = storage.databaseURL
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -18,11 +22,11 @@ public final class AppDatabase: Sendable {
         // writer waits for the other instead of failing with SQLITE_BUSY.
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
-        return try AppDatabase(DatabaseQueue(path: url.path, configuration: configuration))
+        return try AppDatabase(DatabaseQueue(path: url.path, configuration: configuration), storage: storage)
     }
 
-    public static func inMemory() throws -> AppDatabase {
-        try AppDatabase(DatabaseQueue())
+    public static func inMemory(storage: MeetingStorage = .temporary()) throws -> AppDatabase {
+        try AppDatabase(DatabaseQueue(), storage: storage)
     }
 
     static var migrator: DatabaseMigrator {
@@ -152,6 +156,18 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v4") { db in
+            // Files attached to notes (prints of the screen); the kind is
+            // free-form and the path relative to the meeting directory.
+            try db.create(table: "attachment") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.belongsTo("note", onDelete: .cascade).notNull()
+                t.column("kind", .text).notNull()
+                t.column("path", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+        }
+
         return migrator
     }
 
@@ -251,6 +267,8 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// Deletes the meeting with everything about it, its directory (audio,
+    /// attachments) included.
     public func deleteMeeting(_ id: Int64) throws {
         try writer.write { db in
             // Children are deleted explicitly instead of relying on the FK
@@ -258,11 +276,28 @@ public final class AppDatabase: Sendable {
             // direct deletes unless recursive_triggers is enabled, and the
             // cascade would leave stale rows behind in segmentFts/noteFts.
             try Segment.filter(Column("meetingId") == id).deleteAll(db)
+            try db.execute(
+                sql: "DELETE FROM attachment WHERE noteId IN (SELECT id FROM note WHERE meetingId = ?)",
+                arguments: [id]
+            )
             try Note.filter(Column("meetingId") == id).deleteAll(db)
             try Screenshot.filter(Column("meetingId") == id).deleteAll(db)
             try MeetingSpeaker.filter(Column("meetingId") == id).deleteAll(db)
             try MeetingDocument.filter(Column("meetingId") == id).deleteAll(db)
             _ = try Meeting.deleteOne(db, key: id)
+        }
+        removeFiles([storage.meetingDirectory(id: id)])
+    }
+
+    /// Files are removed only after their rows are gone; one already
+    /// missing is fine, any other failure is logged.
+    private func removeFiles(_ urls: [URL]) {
+        for url in urls where FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                FileLog.shared.append("arquivos: falha ao apagar \(url.path): \(error)")
+            }
         }
     }
 
@@ -291,21 +326,89 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// A note, optionally with files attached (prints of the screen): each
+    /// file is moved into the meeting's attachments directory. The text may
+    /// be empty when there is at least one file.
     @discardableResult
-    public func addNote(meetingId: Int64, tMs: Int, text: String) throws -> Note {
-        try writer.write { db in
-            var note = Note(meetingId: meetingId, tMs: tMs, text: text)
-            try note.insert(db)
-            return note
+    public func addNote(meetingId: Int64, tMs: Int, text: String, attachments files: [URL] = [], at date: Date = Date()) throws -> Note {
+        var moved: [(from: URL, to: URL)] = []
+        do {
+            if !files.isEmpty {
+                try FileManager.default.createDirectory(
+                    at: storage.attachmentsDirectory(meetingId: meetingId),
+                    withIntermediateDirectories: true
+                )
+            }
+            for file in files {
+                let name = UUID().uuidString + (file.pathExtension.isEmpty ? "" : ".\(file.pathExtension.lowercased())")
+                let destination = storage.attachmentsDirectory(meetingId: meetingId).appendingPathComponent(name)
+                try FileManager.default.moveItem(at: file, to: destination)
+                moved.append((file, destination))
+            }
+            return try writer.write { db in
+                var note = Note(meetingId: meetingId, tMs: tMs, text: text)
+                try note.insert(db)
+                for file in moved {
+                    var attachment = Attachment(
+                        noteId: note.id!,
+                        kind: Attachment.kind(of: file.to),
+                        path: "attachments/\(file.to.lastPathComponent)",
+                        createdAt: date
+                    )
+                    try attachment.insert(db)
+                }
+                return note
+            }
+        } catch {
+            // The captures go back where they were rather than being lost.
+            for file in moved {
+                try? FileManager.default.moveItem(at: file.to, to: file.from)
+            }
+            throw error
         }
     }
 
+    /// Deletes the note with its attachments, rows and files.
     public func deleteNote(_ id: Int64) throws {
-        try writer.write { db in _ = try Note.deleteOne(db, key: id) }
+        let files = try writer.write { db -> [URL] in
+            guard let note = try Note.fetchOne(db, key: id) else { return [] }
+            let attachments = try Attachment.filter(Column("noteId") == id).fetchAll(db)
+            try Attachment.filter(Column("noteId") == id).deleteAll(db)
+            _ = try Note.deleteOne(db, key: id)
+            return attachments.map { storage.file(meetingId: note.meetingId, path: $0.path) }
+        }
+        removeFiles(files)
     }
 
     public func note(id: Int64) throws -> Note? {
         try writer.read { db in try Note.fetchOne(db, key: id) }
+    }
+
+    /// Attachments of every note of the meeting, in the order they were added.
+    public func attachments(meetingId: Int64) throws -> [NoteAttachment] {
+        try writer.read { db in
+            try Attachment.fetchAll(db, sql: """
+                SELECT attachment.*
+                FROM attachment JOIN note ON note.id = attachment.noteId
+                WHERE note.meetingId = ?
+                ORDER BY attachment.createdAt, attachment.id
+                """, arguments: [meetingId])
+        }
+        .map { resolve($0, meetingId: meetingId) }
+    }
+
+    public func attachments(noteId: Int64) throws -> [NoteAttachment] {
+        guard let note = try note(id: noteId) else { return [] }
+        return try attachments(meetingId: note.meetingId).filter { $0.noteId == noteId }
+    }
+
+    private func resolve(_ attachment: Attachment, meetingId: Int64) -> NoteAttachment {
+        NoteAttachment(
+            id: attachment.id ?? 0,
+            noteId: attachment.noteId,
+            kind: attachment.kind,
+            url: storage.file(meetingId: meetingId, path: attachment.path)
+        )
     }
 
     // MARK: - Documents
@@ -554,6 +657,17 @@ public final class AppDatabase: Sendable {
     public func noteCounts() throws -> [Int64: Int] {
         try writer.read { db in
             let rows = try Row.fetchAll(db, sql: "SELECT meetingId, count(*) AS n FROM note GROUP BY meetingId")
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0["meetingId"], $0["n"]) })
+        }
+    }
+
+    public func attachmentCounts() throws -> [Int64: Int] {
+        try writer.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT note.meetingId, count(*) AS n
+                FROM attachment JOIN note ON note.id = attachment.noteId
+                GROUP BY note.meetingId
+                """)
             return Dictionary(uniqueKeysWithValues: rows.map { ($0["meetingId"], $0["n"]) })
         }
     }

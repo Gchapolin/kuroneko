@@ -36,7 +36,7 @@ import Testing
             try db.execute(sql: "INSERT INTO note (meetingId, tMs, kind, text) VALUES (1, 10, 'acao', 'cobrar deploy')")
         }
 
-        let db = try AppDatabase(queue)
+        let db = try AppDatabase(queue, storage: .temporary())
 
         let daily = try #require(try db.meeting(id: 1))
         #expect(daily.tags == ["daily"])

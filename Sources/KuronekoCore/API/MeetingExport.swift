@@ -64,6 +64,14 @@ public struct MeetingExport: Codable, Equatable, Sendable {
         public var excerpt: String
     }
 
+    /// A file attached to a note; `kind` is free-form ("image").
+    public struct Attachment: Codable, Equatable, Sendable {
+        public var id: Int64
+        public var kind: String
+        /// Absolute path.
+        public var path: String
+    }
+
     /// A block of speech ("speech") or a note ("note"), in time order;
     /// fields of the other type are absent.
     public struct Entry: Codable, Equatable, Sendable {
@@ -79,6 +87,9 @@ public struct MeetingExport: Codable, Equatable, Sendable {
         public var at: Date?
         public var tags: [String]?
         public var context: Context?
+        public var attachments: [Attachment]?
+        /// When a note was marked done (a #acao note is a pendência).
+        public var resolvedAt: Date?
     }
 
     public struct Document: Codable, Equatable, Sendable {
@@ -163,7 +174,8 @@ extension AppDatabase {
             ))
         }
 
-        let timeline = Timeline.entries(segments: segments, notes: notes).map { entry -> MeetingExport.Entry in
+        let attachments = try attachments(meetingId: meetingId)
+        let timeline = Timeline.entries(segments: segments, notes: notes, attachments: attachments).map { entry -> MeetingExport.Entry in
             switch entry {
             case .speech(let block):
                 return .init(
@@ -175,7 +187,7 @@ extension AppDatabase {
                     name: name(block.speakerKey, block.segments.first?.personId),
                     segments: block.segments.map { .init(startMs: $0.tStartMs, endMs: $0.tEndMs, text: $0.text, confidence: $0.confidence) }
                 )
-            case .note(let note):
+            case .note(let note, let files):
                 let context = Timeline.context(forNoteAtMs: note.tMs, segments: segments).map { context in
                     MeetingExport.Context(
                         speaker: context.block.speakerKey,
@@ -191,7 +203,9 @@ extension AppDatabase {
                     noteId: note.id,
                     at: meeting.date(atOffsetMs: note.tMs),
                     tags: note.tags,
-                    context: context
+                    context: context,
+                    attachments: files.map { .init(id: $0.id, kind: $0.kind, path: $0.url.path) },
+                    resolvedAt: note.resolvedAt
                 )
             }
         }
