@@ -675,8 +675,10 @@ public final class AppDatabase: Sendable {
     }
 
     /// Names a voice of a meeting. The person is created when new, every
-    /// segment of that voice is attributed to them, and the voice becomes a
-    /// voiceprint so future meetings recognize them automatically.
+    /// segment of that voice is attributed to them, the meeting's texts (the
+    /// summary) call them by the new name instead of "Pessoa N" or the name
+    /// they had, and the voice becomes a voiceprint so future meetings
+    /// recognize them automatically.
     @discardableResult
     public func assignSpeaker(meetingId: Int64, diarCluster: Int, personName: String) throws -> Person {
         let name = personName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -690,8 +692,18 @@ public final class AppDatabase: Sendable {
             guard var speaker = try MeetingSpeaker
                 .filter(Column("meetingId") == meetingId && Column("diarCluster") == diarCluster)
                 .fetchOne(db) else { return person }
+            // How the meeting's texts called this voice until now.
+            let previousName = try speaker.personId.flatMap { try Person.fetchOne(db, key: $0)?.name }
+                ?? SpeakerLabel.label(cluster: diarCluster)
             speaker.personId = personId
             try speaker.update(db)
+            for var document in try MeetingDocument.filter(Column("meetingId") == meetingId).fetchAll(db) {
+                let body = NameReplacement.replace(previousName, with: person.name, in: document.body)
+                guard body != document.body else { continue }
+                document.body = body
+                document.updatedAt = Date()
+                try document.update(db)
+            }
             try Segment
                 .filter(Column("meetingId") == meetingId && Column("diarCluster") == diarCluster)
                 .updateAll(db, Column("personId").set(to: personId))

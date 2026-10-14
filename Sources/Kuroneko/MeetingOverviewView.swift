@@ -134,7 +134,7 @@ struct MeetingOverviewView: View {
                         .buttonStyle(.link)
                 } else {
                     Text(Self.origin(of: summary))
-                    Button("Gerar de novo") {
+                    Button("Atualizar resumo") {
                         if summary.source == "claude" {
                             state.summarize(meetingId)
                         } else {
