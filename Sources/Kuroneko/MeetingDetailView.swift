@@ -35,7 +35,6 @@ struct MeetingDetailView: View {
     @State private var matches: [Timeline.Match] = []
     @State private var matchIndex = 0
 
-    @State private var showsTitle = false
     @State private var confirmingDelete = false
     @State private var didFocusOnOpen = false
     @Environment(\.dismiss) private var dismiss
@@ -55,7 +54,10 @@ struct MeetingDetailView: View {
         }
         .background(MeetingStyle.content)
         .background(WindowReader { keys.window = $0 })
-        .navigationTitle(showsTitle ? (data?.meeting.title ?? "Reuniões") : "Reuniões")
+        // A fixed title: switching it as the page scrolled changed the
+        // toolbar, which moved the scroll, which switched it back — the
+        // window froze at 100% CPU.
+        .navigationTitle(data?.meeting.title ?? "Reuniões")
         .toolbar { toolbar }
         .task(id: state.dataVersion) { reload() }
         .onAppear {
@@ -118,11 +120,6 @@ struct MeetingDetailView: View {
                     if phase == .interacting || phase == .tracking, player.isPlaying {
                         following = false
                     }
-                }
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.contentOffset.y > 60
-                } action: { _, scrolled in
-                    showsTitle = scrolled
                 }
                 .onChange(of: scrollRequest) { _, request in
                     guard let request else { return }
