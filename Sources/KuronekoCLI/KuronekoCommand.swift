@@ -78,6 +78,16 @@ struct KuronekoCommand {
             try db.deleteDocument(meetingId: meetingId, kind: kind)
             changed()
             try output(["removed": kind])
+        case .linkAdd(let meetingId, let url, let title):
+            _ = try export(meetingId, db: db)
+            let link = try db.addLink(meetingId: meetingId, url: url, title: title)
+            changed()
+            try output(MeetingExport.Link(link))
+        case .linkRemove(let linkId):
+            guard try db.link(id: linkId) != nil else { throw CLIError("link \(linkId) não existe") }
+            try db.deleteLink(linkId)
+            changed()
+            try output(["removed": linkId])
         case .play(let meetingId, let fromMs):
             try Playback.play(try export(meetingId, db: db), fromMs: fromMs)
         }

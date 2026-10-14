@@ -15,6 +15,8 @@ public enum CLICommand: Equatable, Sendable {
     /// Body read from stdin.
     case documentSet(meetingId: Int64, kind: String)
     case documentRemove(meetingId: Int64, kind: String)
+    case linkAdd(meetingId: Int64, url: String, title: String?)
+    case linkRemove(linkId: Int64)
     case play(meetingId: Int64, fromMs: Int)
     case help
 
@@ -32,6 +34,8 @@ public enum CLICommand: Equatable, Sendable {
           kuroneko summarize <id>                   gera o resumo com o Claude e salva
           kuroneko doc set <id> <tipo>              salva um texto da reunião (stdin)
           kuroneko doc rm <id> <tipo>
+          kuroneko link add <id> <url> [título]     guarda um link da reunião (PR, ticket, doc)
+          kuroneko link rm <id-do-link>
           kuroneko play <id> [--at <tempo>]         toca até o fim ou Ctrl-C; imprime a posição
 
         <tempo>: 03:21, 1:03:21, 201000ms ou segundos.
@@ -91,6 +95,21 @@ public enum CLICommand: Equatable, Sendable {
             case "set": return .documentSet(meetingId: id, kind: kind)
             case "rm": return .documentRemove(meetingId: id, kind: kind)
             default: throw CLIError("uso: kuroneko doc set|rm <id> <tipo>")
+            }
+        case "link":
+            guard !args.isEmpty else { throw CLIError("uso: kuroneko link add|rm …") }
+            switch args.removeFirst() {
+            case "add":
+                let id = try takeId(&args)
+                guard !args.isEmpty else { throw CLIError("uso: kuroneko link add <id> <url> [título]") }
+                let text = args.removeFirst()
+                guard let url = LinkLabel.normalize(text) else { throw CLIError("link inválido: \(text)") }
+                let title = args.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+                return .linkAdd(meetingId: id, url: url, title: title.isEmpty ? nil : title)
+            case "rm":
+                return .linkRemove(linkId: try takeId(&args))
+            default:
+                throw CLIError("uso: kuroneko link add|rm …")
             }
         case "play":
             let id = try takeId(&args)

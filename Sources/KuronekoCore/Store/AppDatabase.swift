@@ -168,6 +168,17 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v5") { db in
+            // Links about a meeting (a PR, a ticket, a doc).
+            try db.create(table: "meetingLink") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.belongsTo("meeting", onDelete: .cascade).notNull()
+                t.column("url", .text).notNull()
+                t.column("title", .text)
+                t.column("createdAt", .datetime).notNull()
+            }
+        }
+
         return migrator
     }
 
@@ -284,6 +295,7 @@ public final class AppDatabase: Sendable {
             try Screenshot.filter(Column("meetingId") == id).deleteAll(db)
             try MeetingSpeaker.filter(Column("meetingId") == id).deleteAll(db)
             try MeetingDocument.filter(Column("meetingId") == id).deleteAll(db)
+            try MeetingLink.filter(Column("meetingId") == id).deleteAll(db)
             _ = try Meeting.deleteOne(db, key: id)
         }
         removeFiles([storage.meetingDirectory(id: id)])
@@ -438,6 +450,39 @@ public final class AppDatabase: Sendable {
     public func deleteDocument(meetingId: Int64, kind: String) throws {
         try writer.write { db in
             _ = try MeetingDocument.filter(Column("meetingId") == meetingId && Column("kind") == kind).deleteAll(db)
+        }
+    }
+
+    // MARK: - Links
+
+    /// `url` as given (see `LinkLabel.normalize`); an empty title is no title.
+    @discardableResult
+    public func addLink(meetingId: Int64, url: String, title: String? = nil, at date: Date = Date()) throws -> MeetingLink {
+        let title = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try writer.write { db in
+            var link = MeetingLink(meetingId: meetingId, url: url, title: title?.isEmpty == false ? title : nil, createdAt: date)
+            try link.insert(db)
+            return link
+        }
+    }
+
+    public func deleteLink(_ id: Int64) throws {
+        try writer.write { db in _ = try MeetingLink.deleteOne(db, key: id) }
+    }
+
+    public func link(id: Int64) throws -> MeetingLink? {
+        try writer.read { db in try MeetingLink.fetchOne(db, key: id) }
+    }
+
+    public func links(meetingId: Int64) throws -> [MeetingLink] {
+        try writer.read { db in
+            try MeetingLink.filter(Column("meetingId") == meetingId).order(Column("createdAt"), Column("id")).fetchAll(db)
+        }
+    }
+
+    public func linksByMeeting() throws -> [Int64: [MeetingLink]] {
+        try writer.read { db in
+            Dictionary(grouping: try MeetingLink.order(Column("createdAt"), Column("id")).fetchAll(db), by: \.meetingId)
         }
     }
 

@@ -309,6 +309,36 @@ extension Attachment: FetchableRecord, MutablePersistableRecord {
     }
 }
 
+/// A link about a meeting: a PR, a ticket, a doc.
+public struct MeetingLink: Codable, Identifiable, Equatable, Sendable {
+    public var id: Int64?
+    public var meetingId: Int64
+    public var url: String
+    public var title: String?
+    public var createdAt: Date
+
+    public init(id: Int64? = nil, meetingId: Int64, url: String, title: String? = nil, createdAt: Date) {
+        self.id = id
+        self.meetingId = meetingId
+        self.url = url
+        self.title = title
+        self.createdAt = createdAt
+    }
+
+    /// The title, or a short name made from the URL.
+    public var label: String {
+        title ?? LinkLabel.label(for: url)
+    }
+}
+
+extension MeetingLink: FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "meetingLink"
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
 /// An attachment where the app and clients find it on disk.
 public struct NoteAttachment: Equatable, Sendable, Identifiable {
     public var id: Int64

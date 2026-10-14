@@ -124,6 +124,18 @@ final class AppState {
         perform("apagar a nota") { try db.deleteNote(id) }
     }
 
+    /// False when the text is not a web address.
+    @discardableResult
+    func addLink(_ text: String, title: String? = nil, meetingId: Int64) -> Bool {
+        guard let url = LinkLabel.normalize(text) else { return false }
+        perform("salvar o link") { try db.addLink(meetingId: meetingId, url: url, title: title) }
+        return true
+    }
+
+    func deleteLink(_ id: Int64) {
+        perform("apagar o link") { try db.deleteLink(id) }
+    }
+
     func renameMeeting(_ id: Int64, to title: String) {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
