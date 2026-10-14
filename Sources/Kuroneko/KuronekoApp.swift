@@ -53,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.onKeyUp(for: .quickNote) {
             QuickNoteController.shared.toggle(state: AppState.shared)
         }
+        AppState.shared.start()
         CommandDoubleTap.shared.start {
             QuickNoteController.shared.toggle(state: AppState.shared)
         }

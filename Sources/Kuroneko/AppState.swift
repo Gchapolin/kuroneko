@@ -87,6 +87,14 @@ final class AppState {
         }
         closeStaleMeeting()
         refreshNews()
+    }
+
+    /// Starts watching Chrome and transcribing. Called once the app has
+    /// finished launching: talking to Chrome (Apple events) while the app is
+    /// still launching can swallow the launch event, and then the menu bar
+    /// icon never appears (it failed about 4 launches in 10).
+    func start() {
+        guard monitor == nil else { return }
         startMonitor()
         processing.kick()
     }
