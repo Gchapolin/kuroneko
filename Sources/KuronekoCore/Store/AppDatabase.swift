@@ -113,6 +113,15 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    public func updateAudioPaths(meetingId: Int64, micPath: String?, systemPath: String?) throws {
+        try writer.write { db in
+            guard var meeting = try Meeting.fetchOne(db, key: meetingId) else { return }
+            meeting.audioMicPath = micPath
+            meeting.audioSystemPath = systemPath
+            try meeting.update(db)
+        }
+    }
+
     public func activeMeeting() throws -> Meeting? {
         try writer.read { db in
             try Meeting

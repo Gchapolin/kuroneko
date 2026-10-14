@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Kuroneko grava o seu microfone durante reuniões para transcrição local.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Kuroneko olha as abas do Chrome para saber quando você está numa chamada do Meet.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Kuroneko grava o áudio do sistema (participantes da reunião) para transcrição local.</string>
 </dict>
