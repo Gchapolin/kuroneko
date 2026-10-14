@@ -24,6 +24,7 @@ struct MeetingDetailView: View {
     /// When the user started typing the note during a recording.
     @State private var noteStartedAt: Date?
     @State private var noteContexts: [Int64: NoteContext] = [:]
+    @State private var documents: [MeetingDocument] = []
     @State private var naming: NamingTarget?
     @State private var player = MeetingPlayer()
 
@@ -32,6 +33,15 @@ struct MeetingDetailView: View {
             List {
                 if let meeting {
                     header(meeting)
+                    ForEach(documents, id: \.kind) { document in
+                        let title = document.kind == "summary" ? "Resumo" : document.kind.capitalized
+                        Section(title) {
+                            DocumentText(markdown: document.body, title: title)
+                            Text([document.source == "claude" ? "Gerado pelo Claude" : "Editado", Format.day(document.updatedAt)].joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     if !speakers.isEmpty || hasMicSpeech {
                         Section("Vozes") {
                             if hasMicSpeech {
@@ -278,7 +288,7 @@ struct MeetingDetailView: View {
 
     private func emptyText(_ meeting: Meeting) -> String {
         switch meeting.status {
-        case .recording: "Gravando. A transcrição aparece aqui quando a reunião terminar."
+        case .recording: "Gravando. A transcrição aparece aqui aos poucos, uns 2 minutos atrás da conversa."
         case .recorded, .processing: "Transcrição em andamento."
         case .failed: "Sem transcrição."
         case .done: "Ninguém falou nesta gravação."
@@ -320,6 +330,7 @@ struct MeetingDetailView: View {
         meeting = loaded
         let segments = (try? db.segments(meetingId: meetingId)) ?? []
         hasMicSpeech = segments.contains { $0.channel == .mic }
+        documents = (try? db.documents(meetingId: meetingId)) ?? []
         let notes = (try? db.notes(meetingId: meetingId)) ?? []
         entries = Timeline.entries(segments: segments, notes: notes)
         noteContexts = Dictionary(uniqueKeysWithValues: notes.compactMap { note in
@@ -336,6 +347,52 @@ struct MeetingDetailView: View {
         samples = Dictionary(uniqueKeysWithValues: speakers.compactMap { speaker in
             VoiceReview.sample(cluster: speaker.diarCluster, segments: segments).map { (speaker.diarCluster, $0) }
         })
+    }
+}
+
+/// A summary or other Markdown text, line by line: SwiftUI's Text renders
+/// inline Markdown but drops headings and list structure.
+private struct DocumentText: View {
+    let markdown: String
+    /// The section's title; a first heading repeating it is skipped.
+    let title: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                line
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    private var lines: [Text] {
+        var lines = markdown.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        if let first = lines.first, first.hasPrefix("#"),
+           first.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(title) == .orderedSame {
+            lines.removeFirst()
+        }
+        return lines.map { raw in
+            let line = String(raw)
+            if line.hasPrefix("#") {
+                return Text(inline(line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces))).font(.headline)
+            }
+            if line.hasPrefix("- [ ] ") {
+                return Text("☐ \(inline(String(line.dropFirst(6))))")
+            }
+            if line.hasPrefix("- [x] ") {
+                return Text("☑ \(inline(String(line.dropFirst(6))))")
+            }
+            if line.hasPrefix("- ") {
+                return Text("• \(inline(String(line.dropFirst(2))))")
+            }
+            return Text(inline(line))
+        }
+    }
+
+    private func inline(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
     }
 }
 
