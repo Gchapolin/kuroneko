@@ -142,4 +142,14 @@ import Testing
         #expect(text.contains("[01:00] Renato: precisamos migrar o banco até sexta\n[01:10] Você: fechado\n[01:11] NOTA (às 08:01): cobrar migração #acao\n[01:20] Pessoa 2: e o deploy?"))
         #expect(!forClaude.contains("## Resumo"))
     }
+
+    @Test func documentWithItsOwnHeadingIsNotTitledTwice() throws {
+        let db = try AppDatabase.inMemory()
+        let id = try recordedMeeting(db)
+        try db.setDocument(meetingId: id, kind: "summary", body: "## Resumo\nMigração até sexta.", source: "claude")
+
+        let text = TranscriptText.render(try #require(try db.export(meetingId: id)))
+
+        #expect(text.components(separatedBy: "## Resumo").count == 2)
+    }
 }

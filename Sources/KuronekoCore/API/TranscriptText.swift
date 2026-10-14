@@ -15,7 +15,9 @@ public enum TranscriptText {
         }
         if includeDocuments {
             for document in meeting.documents {
-                lines += ["", "## \(title(ofKind: document.kind))", "", document.body.trimmingCharacters(in: .whitespacesAndNewlines)]
+                let body = document.body.trimmingCharacters(in: .whitespacesAndNewlines)
+                // A summary from Claude already opens with its own heading.
+                lines += body.hasPrefix("#") ? ["", body] : ["", "## \(title(ofKind: document.kind))", "", body]
             }
         }
         lines += ["", "## Transcrição", ""]
