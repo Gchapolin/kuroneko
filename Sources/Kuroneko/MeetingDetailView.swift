@@ -62,6 +62,10 @@ struct MeetingDetailView: View {
             keys.handle = { key, typing in handle(key, typing: typing) }
             keys.start()
             state.markNewsSeen(meetingId)
+            // Back on screen after leaving it, which let go of the audio.
+            if let data, !data.isRecording, !player.hasAudio {
+                player.load(data.meeting)
+            }
         }
         .onDisappear {
             player.stop()
