@@ -11,6 +11,7 @@ struct MeetingDetailView: View {
     let state: AppState
     let meetingId: Int64
     let focusMs: Int?
+    var playOnOpen = false
 
     @State private var meeting: Meeting?
     @State private var entries: [TimelineEntry] = []
