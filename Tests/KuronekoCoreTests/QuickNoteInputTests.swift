@@ -1,6 +1,8 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import KuronekoCore
 
 @Suite struct DoubleTapDetectorTests {
@@ -67,6 +69,36 @@ import Testing
         ]
         #expect(run(events) == [0.28])
     }
+
+    @Test func readsTheEventsOfTheTap() {
+        var detector = DoubleTapDetector()
+        let taps: [(CGEventType, CGEventFlags, TimeInterval)] = [
+            (.flagsChanged, .maskCommand, 0), (.flagsChanged, [], 0.08),
+            (.flagsChanged, .maskCommand, 0.25), (.flagsChanged, [], 0.33),
+        ]
+        let fired = taps.map { detector.handle($0.0, flags: $0.1, at: $0.2) }
+        #expect(fired == [false, false, false, true])
+
+        // A click between the taps is a ⌘-click, not a double tap.
+        for click in [CGEventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown] {
+            var detector = DoubleTapDetector()
+            _ = detector.handle(.flagsChanged, flags: .maskCommand, at: 0)
+            _ = detector.handle(click, flags: .maskCommand, at: 0.04)
+            _ = detector.handle(.flagsChanged, flags: [], at: 0.08)
+            _ = detector.handle(.flagsChanged, flags: .maskCommand, at: 0.25)
+            let fired = detector.handle(.flagsChanged, flags: [], at: 0.33)
+            #expect(!fired)
+        }
+    }
+
+    @Test func theTapListensToModifiersKeysAndClicks() {
+        let mask = DoubleTapDetector.eventMask
+        for type in [CGEventType.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown] {
+            #expect(mask & (1 << type.rawValue) != 0)
+        }
+        #expect(mask & (1 << CGEventType.keyUp.rawValue) == 0)
+        #expect(mask & (1 << CGEventType.mouseMoved.rawValue) == 0)
+    }
 }
 
 @Suite struct ScreenCaptureTests {
@@ -111,5 +143,92 @@ import Testing
         #expect(ScreenCapture.displayNumber(of: 7, among: [3, 7]) == 2)
         #expect(ScreenCapture.displayNumber(of: 3, among: [3, 7]) == 1)
         #expect(ScreenCapture.displayNumber(of: 9, among: [3, 7]) == 1)
+    }
+}
+
+@Suite struct NoteDraftTests {
+    private let folder = FileManager.default.temporaryDirectory.appendingPathComponent("kuroneko-draft-\(UUID().uuidString)", isDirectory: true)
+
+    /// A PNG the size `screencapture` would have saved.
+    private func png(width: Int, height: Int, name: String = UUID().uuidString) throws -> URL {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("\(name).png")
+        let context = try #require(CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        let image = try #require(context.makeImage())
+        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        return url
+    }
+
+    private func exists(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.path)
+    }
+
+    @Test func describesEachPrint() throws {
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let window = NoteDraft.Print(url: try png(width: 1440, height: 900), source: .window, app: "Google Chrome")
+
+        #expect(window.title == "Print da janela · Google Chrome")
+        #expect(window.sizeText == "1440 × 900")
+        #expect(NoteDraft.Print(url: window.url, source: .window).title == "Print da janela")
+        #expect(NoteDraft.Print(url: window.url, source: .screen).title == "Tela inteira")
+        #expect(NoteDraft.Print(url: window.url, source: .area).title == "Área")
+        #expect(NoteDraft.Print(url: folder.appendingPathComponent("gone.png"), source: .area).sizeText == nil)
+    }
+
+    @Test func removingAPrintDeletesItsFile() throws {
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var draft = NoteDraft()
+        let first = NoteDraft.Print(url: try png(width: 10, height: 10), source: .screen)
+        let second = NoteDraft.Print(url: try png(width: 10, height: 10), source: .area)
+        let third = NoteDraft.Print(url: try png(width: 10, height: 10), source: .window)
+        [first, second, third].forEach { draft.add($0) }
+
+        draft.remove(second.id)
+        #expect(draft.prints == [first, third])
+        #expect(!exists(second.url))
+
+        let removedThird = draft.removeLast()
+        #expect(removedThird)
+        #expect(draft.prints == [first])
+        #expect(!exists(third.url))
+        #expect(exists(first.url))
+
+        let removedFirst = draft.removeLast(), removedNothing = draft.removeLast()
+        #expect(removedFirst)
+        #expect(!removedNothing)
+    }
+
+    @Test func savesTextOrPrints() throws {
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var draft = NoteDraft()
+        #expect(!draft.canSave(text: "  \n"))
+        #expect(draft.canSave(text: "gráfico de latência"))
+
+        draft.add(NoteDraft.Print(url: try png(width: 10, height: 10), source: .screen))
+        #expect(draft.canSave(text: ""))
+    }
+
+    @Test func savingHandsTheFilesOverAndDiscardingDeletesThem() throws {
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var saved = NoteDraft()
+        let kept = NoteDraft.Print(url: try png(width: 10, height: 10), source: .window)
+        saved.add(kept)
+
+        #expect(saved.takeFiles() == [kept.url])
+        saved.discard()
+        #expect(saved.prints.isEmpty)
+        #expect(exists(kept.url))
+
+        var dropped = NoteDraft()
+        let gone = NoteDraft.Print(url: try png(width: 10, height: 10), source: .area)
+        dropped.add(gone)
+        dropped.discard()
+        #expect(dropped.prints.isEmpty)
+        #expect(!exists(gone.url))
     }
 }
