@@ -25,6 +25,15 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Resumo") {
+                Toggle("Resumir sozinho com o Claude depois da transcrição", isOn: Binding(
+                    get: { state.autoSummarize },
+                    set: { state.setAutoSummarize($0) }
+                ))
+                Text("Usa o Claude Code da sua conta. O texto da reunião sai do Mac só nesse momento; o áudio nunca sai.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Nota rápida") {
                 KeyboardShortcuts.Recorder("Atalho:", name: .quickNote)
                 Text("Funciona em qualquer app durante uma gravação. Use #tags, como #acao ou #duvida. Digite @Nome enquanto alguém fala para o Kuroneko saber quem é aquela voz.")
