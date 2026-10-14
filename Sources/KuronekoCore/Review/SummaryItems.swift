@@ -43,7 +43,7 @@ public enum SummaryItems {
     /// Heading prefixes (accents and case ignored) and the kind of their items.
     static let kinds: [(prefix: String, kind: String)] = [
         ("pendencia", "task"), ("tarefa", "task"), ("acoes", "task"), ("proximos passos", "task"),
-        ("action item", "task"), ("to-do", "task"), ("todo", "task"),
+        ("action item", "task"), ("to-do", "task"),
         ("decis", "decision"),
     ]
     /// Section names that make a heading even without `#`, as a bare or
