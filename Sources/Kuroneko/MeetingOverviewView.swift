@@ -31,6 +31,12 @@ struct MeetingOverviewView: View {
                 }
                 notes
                 footer
+                ForEach(data.documents, id: \.kind) { document in
+                    VStack(alignment: .leading, spacing: 6) {
+                        MeetingStyle.sectionTitle(document.kind.prefix(1).uppercased() + document.kind.dropFirst())
+                        DocumentText(markdown: document.body, title: document.kind)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -349,5 +355,45 @@ private struct SummaryEditor: View {
         }
         .padding(16)
         .frame(minWidth: 420, idealWidth: 480, minHeight: 380, idealHeight: 560)
+    }
+}
+
+/// Another text of the meeting, line by line: SwiftUI's Text renders inline
+/// Markdown but drops headings and list structure.
+private struct DocumentText: View {
+    let markdown: String
+    /// The section's title; a first heading repeating it is skipped.
+    let title: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                line.fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    private var lines: [Text] {
+        var lines = markdown.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        if let first = lines.first, first.hasPrefix("#"),
+           first.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(title) == .orderedSame {
+            lines.removeFirst()
+        }
+        return lines.map { line in
+            if line.hasPrefix("#") {
+                return Text(Markdown.inline(line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces))).font(.headline)
+            }
+            if line.hasPrefix("- [ ] ") {
+                return Text("☐ \(Markdown.inline(String(line.dropFirst(6))))")
+            }
+            if line.hasPrefix("- [x] ") {
+                return Text("☑ \(Markdown.inline(String(line.dropFirst(6))))")
+            }
+            if line.hasPrefix("- ") {
+                return Text("• \(Markdown.inline(String(line.dropFirst(2))))")
+            }
+            return Text(Markdown.inline(line))
+        }
     }
 }

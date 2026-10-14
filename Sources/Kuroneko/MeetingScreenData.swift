@@ -31,6 +31,8 @@ struct MeetingScreenData {
     var candidates: [Int: [PendingVoice.Candidate]]
     var samples: [Int: VoiceSample]
     var summary: MeetingDocument?
+    /// Texts of other kinds, written with `kuroneko doc set`.
+    var documents: [MeetingDocument]
     var overview: SummaryOverview
     var tasks: [TaskItem]
     var decisions: [SummaryItem]
@@ -58,7 +60,8 @@ struct MeetingScreenData {
         let speakers = try db.speakers(meetingId: meetingId)
         let people = try db.persons()
         let voiceprints = try db.voiceprints()
-        let summary = try db.documents(meetingId: meetingId).first { $0.kind == "summary" }
+        let documents = try db.documents(meetingId: meetingId)
+        let summary = documents.first { $0.kind == "summary" }
         let persons = Dictionary(uniqueKeysWithValues: people.compactMap { person in person.id.map { ($0, person.name) } })
 
         return MeetingScreenData(
@@ -80,6 +83,7 @@ struct MeetingScreenData {
                 VoiceReview.sample(cluster: speaker.diarCluster, segments: segments).map { (speaker.diarCluster, $0) }
             }),
             summary: summary,
+            documents: documents.filter { $0.kind != "summary" },
             overview: summary.map { SummaryOverview.parse($0.body) } ?? SummaryOverview(intro: [], sections: []),
             tasks: try db.tasks(meetingId: meetingId),
             decisions: summary.map { SummaryItems.parse($0.body).filter { $0.kind == "decision" } } ?? [],
