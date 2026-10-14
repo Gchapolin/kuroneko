@@ -35,8 +35,12 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Nota rápida") {
-                KeyboardShortcuts.Recorder("Atalho:", name: .quickNote)
-                Text("Funciona em qualquer app durante uma gravação. Use #tags, como #acao ou #duvida. Digite @Nome enquanto alguém fala para o Kuroneko saber quem é aquela voz.")
+                LabeledContent("Abrir:") {
+                    Text("⌘⌘ (dois toques no Command)")
+                }
+                commandDoubleTapStatus
+                KeyboardShortcuts.Recorder("Outro atalho:", name: .quickNote)
+                Text("Funciona em qualquer app durante uma gravação. Na nota, ⌘1, ⌘2 e ⌘3 anexam um print da janela, da tela inteira ou de uma área. Use #tags, como #acao ou #duvida. Digite @Nome enquanto alguém fala para o Kuroneko saber quem é aquela voz.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -53,5 +57,29 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 440)
+    }
+
+    /// ⌘⌘ needs Input Monitoring to see the keys typed in other apps.
+    @ViewBuilder private var commandDoubleTapStatus: some View {
+        let hotkey = CommandDoubleTap.shared
+        if hotkey.isListening {
+            Label {
+                Text("Monitoramento de Entrada permitido")
+            } icon: {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+        } else {
+            HStack {
+                Label {
+                    Text("O ⌘⌘ precisa da permissão de Monitoramento de Entrada.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                Spacer()
+                Button("Permitir…") {
+                    hotkey.requestPermission()
+                }
+            }
+        }
     }
 }

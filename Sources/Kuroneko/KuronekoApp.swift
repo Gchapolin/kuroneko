@@ -51,12 +51,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.onKeyUp(for: .quickNote) {
             QuickNoteController.shared.toggle(state: AppState.shared)
         }
+        CommandDoubleTap.shared.start {
+            QuickNoteController.shared.toggle(state: AppState.shared)
+        }
         AppState.shared.onVoicePrompt { meetingId in
             VoicePromptController.shared.update(meetingId: meetingId, state: AppState.shared)
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        CommandDoubleTap.shared.stop()
         // Stop the recorders so the WAV headers are finalized before exit.
         AppState.shared.endActiveMeeting()
     }
