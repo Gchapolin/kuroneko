@@ -62,6 +62,9 @@ Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca i
 - Teste com os modelos reais (opcional, ~2 GB): `KURONEKO_E2E_AUDIO=/caminho/system.wav swift test --filter EndToEnd`
 - Benchmark de diarização e reconhecimento de vozes em reuniões reais do corpus AMI: `KURONEKO_AMI=/pasta swift test --filter DiarizationBenchmark` (instruções no teste; baseline 98%/98%)
 - Vozes sintéticas do `say` não servem para testar diarização: o modelo funde vozes do macOS que soam parecidas
+- CI: `.github/workflows/ci.yml` roda `swift test` em todo push (runner `macos-26`)
+- Release: `git tag vX.Y.Z && git push origin vX.Y.Z` → `release.yml` monta o app assinado ad hoc e publica `Kuroneko-X.Y.Z.zip`, `SHA256SUMS` e `install.sh` no GitHub Release (`workflow_dispatch` = dry run sem publicar)
+- Instalar/atualizar: `curl -fsSL https://github.com/gandarfh/kuroneko/releases/latest/download/install.sh | sh` — confere o checksum, re-assina com o "Apple Development" local (mesmo designated requirement do `make run`, então as permissões do TCC sobrevivem às atualizações), recusa atualizar durante uma gravação e instala em `/Applications`
 
 ## Current Focus
 

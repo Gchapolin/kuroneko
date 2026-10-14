@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # A dry run: builds and packages the app but publishes nothing.
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the app
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Compute the release version
+        id: version
+        # A dry run has no tag to read a version from.
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Signed ad hoc: the user's certificate never leaves their Mac. The
+      # installer re-signs with it there, which is what keeps macOS from
+      # asking for the mic, system audio and Automation permissions again
+      # after every update.
+      - name: Build the app bundle
+        run: make bundle SIGN_IDENTITY=- VERSION="${{ steps.version.outputs.version }}" BUILD_NUMBER="${{ github.run_number }}"
+
+      - name: Package the release archive
+        run: |
+          set -euo pipefail
+          asset="Kuroneko-${{ steps.version.outputs.version }}.zip"
+          ditto -c -k --keepParent dist/Kuroneko.app "$asset"
+          shasum -a 256 "$asset" > SHA256SUMS
+          cp scripts/install.sh install.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: |
+            Kuroneko-*.zip
+            SHA256SUMS
+            install.sh
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    # Publishing only ever happens for a tag; a dry run stops after build.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release
+          path: dist
+
+      # The installer ships with each release, so the "latest" link always
+      # serves the script that matches the latest build.
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          generate_release_notes: true
+          body: |
+            Instalar ou atualizar:
+
+            ```sh
+            curl -fsSL https://github.com/gandarfh/kuroneko/releases/latest/download/install.sh | sh
+            ```
+          files: |
+            dist/Kuroneko-*.zip
+            dist/SHA256SUMS
+            dist/install.sh

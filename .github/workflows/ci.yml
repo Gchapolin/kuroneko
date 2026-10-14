@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    # The same macOS and Xcode generation the app is developed on.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The end-to-end and AMI benchmark suites need audio and models that
+      # are not in the repo; without their env vars they skip themselves.
+      - name: Run the tests
+        run: swift test
