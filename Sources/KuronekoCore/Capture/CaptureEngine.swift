@@ -23,8 +23,10 @@ public final class CaptureEngine: @unchecked Sendable {
         case global
     }
 
-    private let mic = MicRecorder()
-    private let tap = ProcessTapRecorder()
+    /// Whether anyone (the user or the call) is talking right now.
+    public let speech = SpeechMeter()
+    private let mic: MicRecorder
+    private let tap: ProcessTapRecorder
     private let lock = NSLock()
     private let logger = Logger(subsystem: "com.gandarfh.kuroneko", category: "CaptureEngine")
 
@@ -38,7 +40,10 @@ public final class CaptureEngine: @unchecked Sendable {
     /// Called when a mic connected mid-meeting starts recording.
     public var onLateMicStart: (@Sendable (URL) -> Void)?
 
-    public init() {}
+    public init() {
+        mic = MicRecorder(meter: speech)
+        tap = ProcessTapRecorder(meter: speech)
+    }
 
     public func start(in directory: URL) async throws -> RecordingPaths {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -91,6 +96,7 @@ public final class CaptureEngine: @unchecked Sendable {
         removeInputDeviceListener()
         mic.stop()
         tap.stop()
+        speech.reset()
         systemSource = nil
         isMicRecording = false
         lock.withLock {

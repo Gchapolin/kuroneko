@@ -1,11 +1,13 @@
 <!doctype html>
 <!--
   Exports the typing cat the app shows during a call
-  (Sources/Kuroneko/Resources/TypingCat/cat-NN.png).
+  (Sources/Kuroneko/Resources/TypingCat/idle-NN.png and typing-NN.png).
 
-  The kitten in kitten.html is a physics simulation, not a looping clip: this
-  page renders a few seconds of it at a fixed frame rate and picks the stretch
-  whose first and last frames match best, so the frames loop without a jump.
+  The kitten in kitten.html is a physics simulation, not a looping clip. This
+  page renders it at a fixed frame rate on a transparent background, twice:
+  resting (paws on the keys) and typing. From each it keeps the stretch that
+  loops without a jump, and the typing loop is also chosen to start and end
+  on the resting pose, so the app can switch between them seamlessly.
 
     python3 scripts/typing-cat/serve.py
     open http://localhost:8765      # "Salvar no app" writes the frames
@@ -20,87 +22,101 @@
   @media (prefers-color-scheme: dark) { :root { --bg: #1d1d1f; --fg: #eee; --panel: #2a2a2c; } }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px -apple-system, system-ui, sans-serif; padding: 16px; }
   main { display: grid; gap: 16px; justify-items: center; }
-  .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+  .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: center; }
   figure { margin: 0; display: grid; gap: 6px; justify-items: center; }
-  iframe, #loop { width: 240px; height: 160px; border: 0; border-radius: 16px; background: #f7f4ef; }
+  iframe, canvas.loop { width: 240px; height: 160px; border: 0; border-radius: 12px; }
+  canvas.loop { background: repeating-conic-gradient(#8883 0 25%, #0000 0 50%) 0 0 / 16px 16px; }
   #capture { position: absolute; left: -9999px; }
   button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid #8884; background: var(--panel); color: var(--fg); cursor: pointer; }
-  #frames { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; max-width: 820px; }
-  #frames img { width: 48px; height: 48px; border-radius: 4px; }
+  label { display: flex; gap: 6px; align-items: center; }
 </style>
 </head>
 <body>
 <main>
   <div class="row">
     <figure><iframe src="kitten.html?bg=f7f4ef&energy=60"></iframe><figcaption>Ao vivo</figcaption></figure>
-    <figure><canvas id="loop" width="480" height="320"></canvas><figcaption id="info">Loop exportado</figcaption></figure>
+    <figure><canvas class="loop" id="loop" width="480" height="320"></canvas><figcaption id="info">Loop exportado</figcaption></figure>
   </div>
-  <div class="row"><button id="export">Exportar frames</button><button id="save" disabled>Salvar no app</button></div>
-  <div id="frames"></div>
+  <div class="row">
+    <button id="export">Exportar frames</button>
+    <label><input type="checkbox" id="speaking"> Alguém falando</label>
+    <button id="save" disabled>Salvar no app</button>
+  </div>
 </main>
-<iframe id="capture" src="kitten.html?capture&bg=f7f4ef&energy=60"></iframe>
+<iframe id="capture" src="kitten.html?capture&energy=60" style="width:240px;height:160px"></iframe>
 
 <script>
 // 15 fps keeps the frames small; the panel is 240x160 pt, so 480x320 px frames.
-const FPS = 15, WARMUP = 3, WINDOW = 8, MIN_LOOP = 2, MAX_LOOP = 5;
+const FPS = 15;
 
-// Tiny grayscale thumbnails, enough to compare poses.
+// Tiny thumbnails (colour and alpha), enough to compare poses.
 async function thumbs(urls) {
-  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const c = document.createElement('canvas'); c.width = 48; c.height = 32;
   const g = c.getContext('2d', { willReadFrequently: true });
   const out = [];
   for (const u of urls) {
     const img = new Image(); img.src = u; await img.decode();
-    g.drawImage(img, 0, 0, 32, 32);
-    const d = g.getImageData(0, 0, 32, 32).data, v = new Float32Array(1024);
-    for (let i = 0; i < 1024; i++) v[i] = d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2];
-    out.push(v);
+    g.clearRect(0, 0, 48, 32);
+    g.drawImage(img, 0, 0, 48, 32);
+    out.push(Float32Array.from(g.getImageData(0, 0, 48, 32).data));
   }
   return out;
 }
+const diff = (a, b) => { let d = 0; for (let k = 0; k < a.length; k++) d += Math.abs(a[k] - b[k]); return d / a.length / 2.55; };
 
-// The stretch [i, j) whose frame j looks most like frame i.
-function bestLoop(t) {
-  let best = { i: 0, j: MIN_LOOP * FPS, diff: Infinity };
+// The stretch [i, j) of `t` (seconds min..max long) with the lowest cost.
+function bestLoop(t, min, max, cost) {
+  const lo = Math.round(min * FPS), hi = Math.round(max * FPS);
+  let best = { i: 0, j: Math.min(t.length - 1, lo), cost: Infinity };
   for (let i = 0; i < t.length; i++)
-    for (let j = i + MIN_LOOP * FPS; j <= Math.min(t.length - 1, i + MAX_LOOP * FPS); j++) {
-      let diff = 0;
-      for (let k = 0; k < 1024; k++) diff += Math.abs(t[i][k] - t[j][k]);
-      if (diff < best.diff) best = { i, j, diff };
+    for (let j = i + lo; j <= Math.min(t.length - 1, i + hi); j++) {
+      const c = cost(i, j);
+      if (c < best.cost) best = { i, j, cost: c };
     }
   return best;
 }
 
-window.exportLoop = async () => {
+window.exportLoops = async () => {
   const cap = document.getElementById('capture').contentWindow;
-  cap.captureFrames(WARMUP, FPS);
-  const all = cap.captureFrames(WINDOW, FPS);
-  const { i, j, diff } = bestLoop(await thumbs(all));
-  const frames = all.slice(i, j);
-  document.getElementById('info').textContent = `${frames.length} frames, ${(frames.length / FPS).toFixed(1)} s, emenda ${(diff / 1024 / 7.65).toFixed(1)}%`;
-  return frames;
+  cap.captureFrames(3, FPS, false);   // settle into the resting pose
+  const idleAll = cap.captureFrames(6, FPS, false);
+  const it = await thumbs(idleAll);
+  const idle = bestLoop(it, 2, 4, (i, j) => diff(it[i], it[j]));
+  const rest = it[idle.i];
+  const typingAll = cap.captureFrames(8, FPS, true);
+  const tt = await thumbs(typingAll);
+  const typing = bestLoop(tt, 1.5, 4, (i, j) => diff(tt[i], tt[j]) + diff(tt[i], rest) + diff(tt[j], rest));
+  document.getElementById('info').textContent =
+    `parado ${idle.j - idle.i} frames (emenda ${idle.cost.toFixed(1)}%), digitando ${typing.j - typing.i} frames (custo ${typing.cost.toFixed(1)}%)`;
+  return { idle: idleAll.slice(idle.i, idle.j), typing: typingAll.slice(typing.i, typing.j) };
 };
 
+// Plays the loops the way the app does (CatAnimation): typing starts at
+// once, and stops only at the end of its loop.
 let timer;
-document.getElementById('export').addEventListener('click', async () => {
-  const frames = window.lastFrames = await window.exportLoop();
-  document.getElementById('save').disabled = false;
-  const box = document.getElementById('frames');
-  box.replaceChildren(...frames.map((url, n) => {
-    const a = document.createElement('a');
-    a.href = url; a.download = `cat-${String(n).padStart(2, '0')}.png`;
-    const img = new Image(); img.src = url; a.append(img);
-    return a;
-  }));
-  const imgs = await Promise.all(frames.map(u => { const m = new Image(); m.src = u; return m.decode().then(() => m); }));
-  const g = document.getElementById('loop').getContext('2d');
-  let n = 0;
+async function play(loops) {
+  const load = urls => Promise.all(urls.map(u => { const m = new Image(); m.src = u; return m.decode().then(() => m); }));
+  const idle = await load(loops.idle), typing = await load(loops.typing);
+  const g = document.getElementById('loop').getContext('2d'), speaking = document.getElementById('speaking');
+  let clip = 'idle', frame = -1;
   clearInterval(timer);
-  timer = setInterval(() => { g.drawImage(imgs[n], 0, 0, 480, 320); n = (n + 1) % imgs.length; }, 1000 / FPS);
+  timer = setInterval(() => {
+    frame++;
+    if (clip === 'idle') { if (speaking.checked) { clip = 'typing'; frame = 0; } else frame %= idle.length; }
+    else if (frame >= typing.length) { frame = 0; if (!speaking.checked) clip = 'idle'; }
+    g.clearRect(0, 0, 480, 320);
+    g.drawImage((clip === 'idle' ? idle : typing)[frame], 0, 0, 480, 320);
+  }, 1000 / FPS);
+}
+
+document.getElementById('export').addEventListener('click', async () => {
+  window.lastLoops = await window.exportLoops();
+  document.getElementById('save').disabled = false;
+  play(window.lastLoops);
 });
 
 document.getElementById('save').addEventListener('click', async () => {
-  const r = await fetch('/frames', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: window.lastFrames }) });
+  const r = await fetch('/frames', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(window.lastLoops) });
   document.getElementById('info').textContent += r.ok ? ' (salvo no app)' : ` (erro ${r.status})`;
 });
 </script>

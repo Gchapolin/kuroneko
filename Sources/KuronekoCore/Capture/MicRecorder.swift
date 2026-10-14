@@ -12,8 +12,11 @@ public final class MicRecorder: @unchecked Sendable {
     private let logger = Logger(subsystem: "com.gandarfh.kuroneko", category: "MicRecorder")
     private var writer: ResamplingWavWriter?
     private var configurationObserver: NSObjectProtocol?
+    private let meter: SpeechMeter?
 
-    public init() {}
+    public init(meter: SpeechMeter? = nil) {
+        self.meter = meter
+    }
 
     public static func requestPermission() async -> Bool {
         await AVCaptureDevice.requestAccess(for: .audio)
@@ -30,7 +33,7 @@ public final class MicRecorder: @unchecked Sendable {
             guard format.sampleRate > 0, format.channelCount > 0 else {
                 throw CaptureError.unsupportedFormat("mic input format indisponível")
             }
-            let writer = try ResamplingWavWriter(inputFormat: format, fileURL: fileURL)
+            let writer = try ResamplingWavWriter(inputFormat: format, fileURL: fileURL, meter: meter)
             try writer.appendSilence(seconds: leadingSilence)
             try installTapAndStart(writer: writer)
             self.writer = writer

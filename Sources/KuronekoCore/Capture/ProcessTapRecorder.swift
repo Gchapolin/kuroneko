@@ -28,8 +28,11 @@ public final class ProcessTapRecorder: @unchecked Sendable {
     private var tapFormat: AVAudioFormat?
     private var target: Target?
     private var outputDeviceListener: AudioObjectPropertyListenerBlock?
+    private let meter: SpeechMeter?
 
-    public init() {}
+    public init(meter: SpeechMeter? = nil) {
+        self.meter = meter
+    }
 
     /// Creating a tap is also the only public way to trigger (and probe) the
     /// "System Audio Recording" TCC prompt, so a throwing start doubles as
@@ -71,7 +74,7 @@ public final class ProcessTapRecorder: @unchecked Sendable {
             }
             tapFormat = format
             if let fileURL {
-                writer = try ResamplingWavWriter(inputFormat: format, fileURL: fileURL)
+                writer = try ResamplingWavWriter(inputFormat: format, fileURL: fileURL, meter: meter)
             }
 
             let outputUID = try CoreAudioSupport.readDefaultSystemOutputDeviceUID()

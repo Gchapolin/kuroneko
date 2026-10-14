@@ -23,9 +23,11 @@
 
   Add ?selftest to run the physics self-checks.
   Add ?capture to stop the live loop and render frames on demand (used by
-  index.html to export the frames the app plays): Math.random is seeded so a
-  capture is reproducible, and window.captureFrames(seconds, fps) steps the
-  simulation at exactly 1/fps per frame and returns PNG data URLs.
+  index.html to export the frames the app plays): the background is
+  transparent, Math.random is seeded so a capture is reproducible, and
+  window.captureFrames(seconds, fps, typing) steps the simulation at exactly
+  1/fps per frame and returns PNG data URLs. With typing false the kitten
+  keeps its paws on the keys but still blinks and looks around.
 -->
 <html lang="pt-BR">
 <head>
@@ -257,13 +259,13 @@ const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
    Renderer, scene, lights
    ===================================================================== */
 const canvas = document.getElementById('stage');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: CAPTURE, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0xffffff, 1);
+renderer.setClearColor(0xffffff, CAPTURE ? 0 : 1);
 
 const scene = new THREE.Scene();
 const pmrem = new THREE.PMREMGenerator(renderer);
@@ -300,10 +302,11 @@ const blobMat = new THREE.ShaderMaterial({
     void main() {
       vec2 p = (vUv - 0.5) * 2.0; float d2 = dot(p, p);
       float a = (0.6 * exp(-d2 * 3.0) + 0.4 * exp(-d2 * 9.0)) * opacity * (1.0 - smoothstep(0.75, 1.0, sqrt(d2)));
-      gl_FragColor = vec4(vec3(1.0 - 0.55 * a), 1.0);
+      gl_FragColor = ${CAPTURE ? 'vec4(vec3(0.0), 0.55 * a)' : 'vec4(vec3(1.0 - 0.55 * a), 1.0)'};
       #include <colorspace_fragment>
     }`,
-  blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor,
+  // multiplies onto the white page; on a transparent frame it is a plain dark shade
+  ...(CAPTURE ? { transparent: true } : { blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor }),
   depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
 });
 function blob(opacity) {
@@ -996,7 +999,7 @@ function think(dt) {
   }
   let lookTarget = null, lookRate = 6, lidT = 1, pupilT = 0.32, earBackT = mind.irritT > 0 ? 0.55 : 0, earRelaxT = 0, earFwdT = 0;
   mind.slip = false; mind.home = !mind.hunt && !mind.ret; mind.yawTarget = mind.hunt || mind.ret ? mind.yawTarget : 0;
-  let typing = mind.atHome && !held && !petting && mind.startleT <= 0 && !mind.hunt;
+  let typing = !sim.resting && mind.atHome && !held && !petting && mind.startleT <= 0 && !mind.hunt;
   mind.crouch = toward(mind.crouch, 0, 6, dt); mind.wiggle = toward(mind.wiggle, 0, 6, dt);
 
   if (mind.hunt) {
@@ -1874,8 +1877,9 @@ addEventListener('resize', layout);
 if (new URLSearchParams(location.search).has('selftest')) runSelfTest();
 window.__kittenReady = true;
 if (CAPTURE) {
-  window.captureFrames = (seconds, fps) => {
-    mind.idleT = 1e9;   // keep typing: no idle detours inside the loop
+  window.captureFrames = (seconds, fps, typing) => {
+    mind.idleT = 1e9;   // no idle detours inside a loop
+    sim.resting = !typing;
     const dt = 1 / fps, out = [];
     for (let i = 0; i < Math.round(seconds * fps); i++) {
       simulate(dt);

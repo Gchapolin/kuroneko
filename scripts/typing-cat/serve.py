@@ -2,8 +2,8 @@
 
     python3 scripts/typing-cat/serve.py      # then open http://localhost:8765
 
-POST /frames takes {"frames": ["data:image/png;base64,...", ...]} and
-replaces Sources/Kuroneko/Resources/TypingCat/cat-NN.png.
+POST /frames takes {"idle": [...], "typing": [...]} (PNG data URLs) and
+replaces Sources/Kuroneko/Resources/TypingCat/idle-NN.png and typing-NN.png.
 """
 import base64
 import functools
@@ -22,15 +22,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        frames = body["frames"]
-        if not frames or not all(f.startswith(PREFIX) for f in frames):
-            self.send_error(400, "expected PNG data URLs")
+        clips = {name: body.get(name) or [] for name in ("idle", "typing")}
+        if not all(frames and all(f.startswith(PREFIX) for f in frames) for frames in clips.values()):
+            self.send_error(400, "expected idle and typing PNG data URLs")
             return
         OUT.mkdir(parents=True, exist_ok=True)
-        for old in OUT.glob("cat-*.png"):
+        for old in OUT.glob("*.png"):
             old.unlink()
-        for i, f in enumerate(frames):
-            (OUT / f"cat-{i:02d}.png").write_bytes(base64.b64decode(f[len(PREFIX):]))
+        for name, frames in clips.items():
+            for i, f in enumerate(frames):
+                (OUT / f"{name}-{i:02d}.png").write_bytes(base64.b64decode(f[len(PREFIX):]))
         self.send_response(204)
         self.end_headers()
 

@@ -119,6 +119,11 @@ final class AppState {
         activeMeeting != nil
     }
 
+    /// Someone (the user or the call) is talking right now.
+    func isSomeoneSpeaking() -> Bool {
+        capture.speech.isSpeaking()
+    }
+
     var startedAutomatically: Bool {
         policy.ownsActiveMeeting
     }
