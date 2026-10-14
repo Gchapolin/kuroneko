@@ -12,17 +12,18 @@ App de menu bar 100% local que grava sozinho as chamadas do Google Meet (Chrome)
 - **Audio**: Core Audio Process Taps (Chrome) + AVAudioEngine (mic), canais separados e alinhados no mesmo zero
 - **ML local**: WhisperKit (pacote `argmax-oss-swift`) large-v3-turbo para ASR; FluidAudio `OfflineDiarizerManager` (pyannote community-1) para diarização e Silero VAD para detecção de fala — inferência 100% local, modelos em `~/Library/Application Support/Kuroneko/models`
 - **Testing**: Swift Testing (`swift test`)
-- **Hotkeys**: KeyboardShortcuts (sindresorhus), nota rápida em ⌃⌥⌘N
+- **Hotkeys**: KeyboardShortcuts (sindresorhus), nota rápida em ⌃⌥⌘N; toque duplo no ⌘ reconhecido pelo `DoubleTapDetector` (o app do Claude usa ⌥ duplo)
 
 ## Architecture
 
 ```
 Sources/
 ├── KuronekoCore/        # lógica sem UI, testável
-│   ├── Capture/         # tap do Chrome, mic, detecção da call (abas + saída de áudio)
+│   ├── Capture/         # tap do Chrome, mic, detecção da call (abas + saída de áudio), prints (`ScreenCapture`)
 │   ├── Processing/      # pipeline (em lotes durante a call + fechamento): diarização, VAD, eco, idioma, ASR, vozes conhecidas
-│   ├── Review/          # timeline, agrupamento por semana, busca
-│   ├── API/             # contrato JSON (MeetingExport), transcrição em Markdown, parser do `kuroneko`
+│   ├── Review/          # timeline, agrupamento por semana, busca, pendências/decisões do resumo, rótulos de links
+│   ├── API/             # contrato JSON (MeetingExport), transcrição em Markdown, parser do `kuroneko`, resumo com o Claude
+│   ├── Support/         # FileLog, toque duplo no ⌘ (`DoubleTapDetector`)
 │   └── Store/           # AppDatabase (GRDB), Models, migrations, FTS5
 ├── KuronekoCLI/         # executável `kuroneko` (vai em Contents/Helpers do app): JSON para editores, scripts e Claude
 ├── Kuroneko/            # executável: MenuBarExtra, janela de reuniões, nota rápida, ajustes
@@ -36,7 +37,13 @@ Durante a call (`advanceLive`, agendado pelo `ProcessingQueue` a cada 2 s): quan
 
 Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca importa SwiftUI/AppKit. Lógica nova vai no core com testes; a UI é casca fina.
 
-Integrações (Neovim em `gandarfh/kuroneko.nvim`, IDEs, web local) falam só com o comando `kuroneko`, nunca com o SQLite: o JSON de `MeetingExport`/`MeetingListItem` é o contrato — mudanças nele são breaking para os clientes. O comando avisa o app por `ExternalChange` (notificação distribuída) e o app recarrega. Resumos: `kuroneko summarize` roda `claude -p` (texto da reunião sai do Mac só nesse momento) e guarda em `meetingDocument` (tipo livre, um por tipo).
+Integrações (Neovim em `gandarfh/kuroneko.nvim`, IDEs, web local) falam só com o comando `kuroneko`, nunca com o SQLite: o JSON de `MeetingExport`/`MeetingListItem` é o contrato — só se adicionam campos, nunca renomear ou remover. O comando avisa o app por `ExternalChange` (notificação distribuída) e o app recarrega. Comandos: `meetings`, `meeting`, `transcript`, `search`, `people`, `name`, `note add|rm`, `summarize`, `doc set|rm`, `link add|rm`, `tasks`, `task done|undo <ref>`, `play` (`kuroneko help`).
+
+Resumos: `Summarizer` roda `claude -p` (`ClaudeCLI`; texto da reunião sai do Mac só nesse momento, áudio nunca) e guarda em `meetingDocument` tipo `summary` (tipo livre, um por tipo). O app resume sozinho quando uma reunião termina de transcrever (ajuste `autoSummarize`, ligado por padrão; só se tem fala e ainda não tem resumo), um por vez fora da fila de transcrição, e marca `meeting.newsAt` — as "novidades" do menu, limpas ao abrir a reunião. Aberto pelo Finder o app tem PATH mínimo: o `claude` é procurado em `KURONEKO_CLAUDE`, no PATH, no PATH do shell de login (sem e depois com `-i`) e em pastas conhecidas; timeout de 5 min.
+
+Pendências: o resumo em Markdown é a fonte da verdade (o usuário edita no Neovim). `SummaryItems` lê as seções "Pendências"/"Decisões" com tolerância (com ou sem `##`, `- [ ]`, `- [x]`, `- `, `* `, `1.`; dono depois de " — "; primeiro `[mm:ss]`) e marcar como feita reescreve só o checkbox daquela linha. Notas `#acao` também são pendências (feita = `note.resolvedAt`). Referência estável: `summary:<reunião>:<linha>:<impressão do texto>` (acha a linha mesmo se ela mudou de lugar) ou `note:<id>`.
+
+Notas com prints: tabela `attachment` (nota, tipo livre, caminho relativo à pasta da reunião, em `meetings/<id>/attachments/`); `addNote(…, attachments:)` move a captura para lá, e a nota pode ficar sem texto. Links por reunião em `meetingLink`, com rótulo curto quando não têm título (`LinkLabel`: "PR #482", "ABC-123", host/último trecho). `AppDatabase` conhece o `MeetingStorage` para resolver esses caminhos e apagar os arquivos junto com as linhas.
 
 ## Coding Conventions
 
@@ -81,7 +88,7 @@ Captura automática do Meet, pipeline de transcrição, revisão (janela de reun
 - WhisperKit não implementa `noSpeechProb` (sempre 0) e `detectLangauge` só devolve o idioma vencedor: a proteção contra alucinação é VAD + `HallucinationFilter`, e as pontuações de pt/es/en vêm de um `TokenSampling` próprio (`LanguageScoreSampler`)
 - Espanhol com sotaque brasileiro é detectado como pt (pt 0.77 / es 0.15): enunciados com idioma duvidoso são transcritos isolados para o Whisper não "traduzir" o trecho
 - Meet: URL e título da aba continuam iguais depois de sair da call; o fim da call é detectado pela saída de áudio do Chrome
-- Deleção de reunião apaga filhos explicitamente (não confia no FK cascade) para os triggers de sincronização do FTS5 dispararem — manter esse padrão em novas tabelas indexadas.
+- Deleção de reunião apaga filhos explicitamente (não confia no FK cascade) para os triggers de sincronização do FTS5 dispararem — manter esse padrão em novas tabelas indexadas. Apagar reunião ou nota também apaga os arquivos (pasta da reunião, anexos) depois das linhas.
 
 ## Do NOT
 
