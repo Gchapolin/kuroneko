@@ -1,0 +1,1893 @@
+<!doctype html>
+<!--
+  Keyboard Kitten (embed). A black kitten typing on a mechanical keyboard; fills whatever box it's in.
+
+  Use it in an iframe:
+    <iframe src="keyboard-kitten-embed.html?eyes=verde&energy=70" style="width:100%;height:520px;border:0"></iframe>
+
+  URL parameters (all optional)
+    eyes    ambar | verde | cobre | azul, or a hex colour such as f2a516   (default ambar)
+    energy  0-100, how frantically it types                                (default 60)
+    bg      background hex such as f7f4ef, to match the host page         (default ffffff)
+    sound   1 to enable the synthesized key clicks and purr (they start on the first click inside the frame)
+
+  Messages the host page can send:   iframe.contentWindow.postMessage(msg, '*')
+    { kitten: 'yarn' }                       throw a ball of yarn
+    { kitten: 'eyes', value: 'azul' }        eye colour (name or hex)
+    { kitten: 'energy', value: 80 }          0-100
+    { kitten: 'sound', value: true }         key clicks and purr on/off
+
+  Messages the frame sends to the host (window.addEventListener('message', ...)):
+    { kitten: 'state', text, keysPerMinute, purrs }   whenever something changes, at most 4 times a second
+                                                      text = the last 300 characters it typed
+
+  Add ?selftest to run the physics self-checks.
+  Add ?capture to stop the live loop and render frames on demand (used by
+  index.html to export the frames the app plays): Math.random is seeded so a
+  capture is reproducible, and window.captureFrames(seconds, fps) steps the
+  simulation at exactly 1/fps per frame and returns PNG data URLs.
+-->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keyboard Kitten</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; background: var(--bg, #ffffff); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: none; }
+  .cursor { position: fixed; left: 0; top: 0; pointer-events: none; z-index: 10; opacity: 0; transition: opacity .2s; }
+  .cursor.on { opacity: 1; }
+  .cursor i {
+    position: absolute; left: -13px; top: -13px; width: 26px; height: 26px; border-radius: 50%;
+    border: 1.5px solid rgba(0,0,0,.62); background: rgba(0,0,0,0);
+    transition: transform .22s cubic-bezier(.3,1.6,.5,1), background-color .2s, border-color .2s, box-shadow .2s;
+  }
+  .cursor.hover i { transform: scale(1.4); border-color: rgba(0,0,0,.8); }
+  .cursor.grab i { transform: scale(2.3); background: rgba(0,0,0,.05); border-width: 1px; border-color: rgba(0,0,0,.7); }
+  .cursor.laser i { transform: scale(.38); background: #ff2b2b; border-color: #ff2b2b; box-shadow: 0 0 0 6px rgba(255,43,43,.22), 0 0 18px 6px rgba(255,43,43,.45); }
+  @media (pointer: coarse) { .cursor { display: none; } }
+  .fail { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); max-width: 26em; font: 15px/1.5 system-ui, sans-serif; color: #5c5753; text-align: center; }
+  #selftest { position: fixed; left: 12px; bottom: 12px; z-index: 20; font: 12px/1.45 ui-monospace, Menlo, monospace; background: #fff; border: 1px solid #ebe7e4; border-radius: 8px; padding: 8px 10px; white-space: pre; }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-label="Um gatinho preto digitando num teclado mecânico"></canvas>
+<div class="cursor" id="cursor"><i></i></div>
+
+<script>
+  // three.js comes from a CDN; tell the visitor what to do if it never arrives.
+  setTimeout(() => {
+    if (!window.__kittenReady) document.body.insertAdjacentHTML('beforeend',
+      '<p class="fail">O three.js não carregou. Verifique a conexão com a internet e recarregue a página.</p>');
+  }, 9000);
+</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+const CAPTURE = new URLSearchParams(location.search).has('capture');
+if (CAPTURE) {
+  // mulberry32: same frames on every export
+  let seed = 0x6b75726f;
+  Math.random = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+/* =====================================================================
+   Keyboard: a 60% ANSI board facing the viewer, the kitten sits behind it.
+   Row 0 (numbers) is at the back, nearest the kitten.
+   ===================================================================== */
+const U = 0.1;
+const CASE_W = 1.6, CASE_D = 0.6, CASE_H = 0.04;
+const KEY_BASE = CASE_H + 0.006, KEY_H = 0.04, KEY_TOP = KEY_BASE + KEY_H;
+const TRAVEL = 0.016, ACT = 0.0085, KEY_SPRING = 0.12;   // a resting paw's weight must not reach the actuation point
+const KB_X0 = -0.75, KB_Z0 = -0.25;
+const ROWS = [
+  [['esc', 1], ...'1234567890-='.split('').map(c => [c, 1]), ['backspace', 2]],
+  [['tab', 1.5], ...'qwertyuiop[]'.split('').map(c => [c, 1]), ['\\', 1.5]],
+  [['caps', 1.75], ..."asdfghjkl;'".split('').map(c => [c, 1]), ['enter', 2.25]],
+  [['shift', 2.25], ...'zxcvbnm,./'.split('').map(c => [c, 1]), ['shift', 2.75]],
+  [['ctrl', 1.25], ['opt', 1.25], ['cmd', 1.25], ['space', 6.25], ['cmd', 1.25], ['opt', 1.25], ['fn', 1.25], ['ctrl', 1.25]],
+];
+const SHIFTED = { '1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')', '-': '_', '=': '+',
+  '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"', ',': '<', '.': '>', '/': '?' };
+const keys = [];
+ROWS.forEach((row, r) => {
+  let u = 0;
+  for (const [label, w] of row) {
+    keys.push({ label, row: r, w, x: KB_X0 + (u + w / 2) * U, z: KB_Z0 + (r + 0.5) * U, start: u,
+      mod: label.length > 1 && label !== 'space', d: 0, v: 0, contact: false, target: 0, down: false, held: 0, rep: 0, shown: -1 });
+    u += w;
+  }
+});
+// key lookup on a quarter-unit grid
+const KEY_GRID = ROWS.map(() => new Int16Array(60).fill(-1));
+keys.forEach((k, i) => { for (let c = Math.round(k.start * 4); c < Math.round((k.start + k.w) * 4); c++) KEY_GRID[k.row][c] = i; });
+function keyAt(x, z) {
+  const r = Math.floor((z - KB_Z0) / U);
+  if (r < 0 || r > 4) return -1;
+  const c = Math.floor((x - KB_X0) / U * 4);
+  return c < 0 || c >= 60 ? -1 : KEY_GRID[r][c];
+}
+
+/* =====================================================================
+   Kitten anatomy. Local space: origin on the table under the hips, y up,
+   facing +z (toward the keyboard and the viewer).
+   ===================================================================== */
+const HIP = 0, THIGH_L = 1, THIGH_R = 2, FOOT_L = 3, FOOT_R = 4, BELLY = 5, CHEST = 6, HEAD = 7, MUZZLE = 8,
+      CHEEK_L = 9, CHEEK_R = 10, EAR_L = 11, EAR_R = 12, PAW_L = 13, PAW_R = 14, T0 = 15, NP = 20;
+const RESTL = new Float64Array([
+  0, 0.158, -0.10,                              // hip
+  -0.115, 0.095, -0.03,   0.115, 0.095, -0.03,  // thighs
+  -0.10, 0.045, 0.12,     0.10, 0.045, 0.12,    // hind feet
+  0, 0.250, 0.02,                               // belly
+  0, 0.370, 0.09,                               // chest
+  0, 0.600, 0.14,                               // head
+  0, 0.555, 0.265,                              // muzzle
+  -0.068, 0.550, 0.205,   0.068, 0.550, 0.205,  // cheeks
+  -0.092, 0.805, 0.11,    0.092, 0.805, 0.11,   // ear tips
+  -0.09, 0.140, 0.36,     0.09, 0.140, 0.36,    // front paws, resting lightly on the number row
+  0.03, 0.06, -0.25,  0.12, 0.04, -0.32,  0.23, 0.04, -0.31,  0.31, 0.035, -0.22,  0.35, 0.03, -0.10,  // tail
+]);
+const RAISED_TAIL = [0.02, 0.16, -0.26,  0.03, 0.27, -0.30,  0.04, 0.39, -0.31,  0.06, 0.50, -0.28,  0.10, 0.58, -0.21];
+const RAD  = [0.155, 0.095, 0.095, 0.045, 0.045, 0.125, 0.115, 0.145, 0.058, 0.055, 0.055, 0.014, 0.014, 0.047, 0.047, 0.036, 0.032, 0.029, 0.026, 0.023];
+const MASS = [0.42, 0.14, 0.14, 0.06, 0.06, 0.20, 0.13, 0.12, 0.02, 0.02, 0.02, 0.008, 0.008, 0.025, 0.025, 0.02, 0.02, 0.02, 0.02, 0.02];  // sits back on its hips
+// the tail swings freely and the paws move under their own power: neither tugs on the body's fit
+const FITW = MASS.map((m, i) => i >= PAW_L ? 0 : m);
+const SOFT = [1, 1, 1, 0.8, 0.8, 1, 1, 0.95, 0.9, 0.9, 0.9, 0.75, 0.75, 0.75, 0.75, 0.25, 0.18, 0.14, 0.11, 0.09];
+const HEAD_GROUP = [HEAD, MUZZLE, CHEEK_L, CHEEK_R, EAR_L, EAR_R];
+const TORSO = [HIP, BELLY, CHEST];
+const NECK = [0, 0.48, 0.12];
+// implicit surface: smooth union of ellipsoids and round-cone strands
+const SPHERES = [[HIP, 0.08], [THIGH_L, 0.06], [THIGH_R, 0.06], [FOOT_L, 0.035], [FOOT_R, 0.035], [BELLY, 0.08], [CHEST, 0.07],
+  [HEAD, 0.06], [MUZZLE, 0.035], [CHEEK_L, 0.04], [CHEEK_R, 0.04], [PAW_L, 0.035], [PAW_R, 0.035]];
+// [a, offset from a (body frame) or null, b, radius at a, radius at b, blend width, flat (ears)]
+const STRANDS = [
+  [HIP, null, BELLY, 0.13, 0.12, 0.07, false],
+  [BELLY, null, CHEST, 0.115, 0.105, 0.07, false],
+  [CHEST, null, HEAD, 0.085, 0.085, 0.07, false],
+  [CHEST, [-0.055, -0.03, 0.04], PAW_L, 0.046, 0.036, 0.04, false],
+  [CHEST, [0.055, -0.03, 0.04], PAW_R, 0.046, 0.036, 0.04, false],
+  [THIGH_L, null, FOOT_L, 0.05, 0.036, 0.04, false],
+  [THIGH_R, null, FOOT_R, 0.05, 0.036, 0.04, false],
+  [HEAD, null, EAR_L, 0.1, 0.012, 0.025, true],
+  [HEAD, null, EAR_R, 0.1, 0.012, 0.025, true],
+];
+const strandEnd = (P, s) => { const [a, off] = STRANDS[s]; return [P[a*3] + (off ? off[0] : 0), P[a*3+1] + (off ? off[1] : 0), P[a*3+2] + (off ? off[2] : 0)]; };
+const STRAND_L0 = STRANDS.map(([, , b], s) => { const a = strandEnd(RESTL, s); return Math.hypot(RESTL[b*3]-a[0], RESTL[b*3+1]-a[1], RESTL[b*3+2]-a[2]); });
+const TAIL_LINKS = [[HIP, T0], [T0, T0 + 1], [T0 + 1, T0 + 2], [T0 + 2, T0 + 3], [T0 + 3, T0 + 4]]
+  .map(([a, b]) => [a, b, Math.hypot(RESTL[b*3]-RESTL[a*3], RESTL[b*3+1]-RESTL[a*3+1], RESTL[b*3+2]-RESTL[a*3+2])]);
+const HOME = [0, 0, -0.56];
+
+/* =====================================================================
+   Simulation constants
+   ===================================================================== */
+const H = 1 / 240, GRAV = 22;
+const BETA = 0, GAMMA = 0;       // a firm kitten: no jelly squash, no blob stretch
+const MU_S = 0.6, MU_K = 0.5;
+const REACH = 0.14;   // a held paw follows the hand only this far from where the body wants it
+const HOLD_DAMP = 0.012, SETTLE_DAMP = 0.03, SETTLE_TIME = 0.25, FAR_DAMP = 0.14;
+const RES = 50, MAX_POLY = 40000;
+const sim = { alpha: 0, damp: 0, energy: 0.6, ai: true, time: 0, acc: 0, purrs: 0 };
+(function stiffness() {
+  const f = 30;                                   // stiff: a kitten, not a gummy
+  sim.alpha = (2 * Math.PI * f * H) ** 2;
+  sim.damp = 0.06;                                // and heavily damped: no jiggle after a bump
+})();
+
+/* =====================================================================
+   Small 3x3 helpers (row-major) — same toolkit as the gummy bears
+   ===================================================================== */
+function inv3(m, out) {
+  const a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+  const A = e*i - f*h, B = f*g - d*i, C = d*h - e*g;
+  const det = a*A + b*B + c*C;
+  if (Math.abs(det) < 1e-12) return 0;
+  const k = 1 / det;
+  out[0] = A*k; out[1] = (c*h - b*i)*k; out[2] = (b*f - c*e)*k;
+  out[3] = B*k; out[4] = (a*i - c*g)*k; out[5] = (c*d - a*f)*k;
+  out[6] = C*k; out[7] = (b*g - a*h)*k; out[8] = (a*e - b*d)*k;
+  return det;
+}
+function quatToMat(x, y, z, w, R) {
+  R[0] = 1 - 2*(y*y + z*z); R[1] = 2*(x*y - w*z);     R[2] = 2*(x*z + w*y);
+  R[3] = 2*(x*y + w*z);     R[4] = 1 - 2*(x*x + z*z); R[5] = 2*(y*z - w*x);
+  R[6] = 2*(x*z - w*y);     R[7] = 2*(y*z + w*x);     R[8] = 1 - 2*(x*x + y*y);
+  return R;
+}
+// Rotational part of A (Mueller et al. 2016), warm-started from quaternion q.
+function extractRotation(q, A, R, iters) {
+  let qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+  for (let it = 0; it < iters; it++) {
+    quatToMat(qx, qy, qz, qw, R);
+    let ox = 0, oy = 0, oz = 0, dot = 0;
+    for (let c = 0; c < 3; c++) {
+      const rx = R[c], ry = R[3+c], rz = R[6+c], ax = A[c], ay = A[3+c], az = A[6+c];
+      ox += ry*az - rz*ay; oy += rz*ax - rx*az; oz += rx*ay - ry*ax;
+      dot += rx*ax + ry*ay + rz*az;
+    }
+    const s = 1 / (Math.abs(dot) + 1e-9);
+    ox *= s; oy *= s; oz *= s;
+    const w = Math.hypot(ox, oy, oz);
+    if (w < 1e-9) break;
+    const hs = Math.sin(w * 0.5) / w, dx = ox*hs, dy = oy*hs, dz = oz*hs, dw = Math.cos(w * 0.5);
+    const nx = dw*qx + dx*qw + dy*qz - dz*qy, ny = dw*qy - dx*qz + dy*qw + dz*qx;
+    const nz = dw*qz + dx*qy - dy*qx + dz*qw, nw = dw*qw - dx*qx - dy*qy - dz*qz;
+    const l = 1 / Math.hypot(nx, ny, nz, nw);
+    qx = nx*l; qy = ny*l; qz = nz*l; qw = nw*l;
+  }
+  q[0] = qx; q[1] = qy; q[2] = qz; q[3] = qw;
+  quatToMat(qx, qy, qz, qw, R);
+}
+// pose P -> offsets Q from the wc-weighted centroid, and the inverse of the wa-weighted Aqq
+const _S9 = new Float64Array(9);
+function restFrame(wc, wa, P, Q, Ainv) {
+  let M = 0, cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < NP; i++) { M += wc[i]; cx += wc[i]*P[i*3]; cy += wc[i]*P[i*3+1]; cz += wc[i]*P[i*3+2]; }
+  cx /= M; cy /= M; cz /= M;
+  const S = _S9; S.fill(0);
+  for (let i = 0; i < NP; i++) {
+    const x = P[i*3]-cx, y = P[i*3+1]-cy, z = P[i*3+2]-cz, w = wa[i];
+    Q[i*3] = x; Q[i*3+1] = y; Q[i*3+2] = z;
+    S[0] += w*x*x; S[1] += w*x*y; S[2] += w*x*z; S[4] += w*y*y; S[5] += w*y*z; S[8] += w*z*z;
+  }
+  S[3] = S[1]; S[6] = S[2]; S[7] = S[5];
+  inv3(S, Ainv);
+  return [cx, cy, cz];
+}
+const REST_C = restFrame(FITW, FITW, RESTL, new Float64Array(NP*3), new Float64Array(9));
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const smooth = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+/* =====================================================================
+   Renderer, scene, lights
+   ===================================================================== */
+const canvas = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0xffffff, 1);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.75;
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 80);
+
+const key = new THREE.DirectionalLight(0xffffff, 2.3);
+key.position.set(-2.4, 4.2, 3.2);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -1.7, right: 1.7, top: 1.7, bottom: -1.7, near: 1, far: 12 });
+key.shadow.bias = -0.0005;
+key.shadow.normalBias = 0.02;
+// strong rim lights: a black cat is read by its outline
+const rimCool = new THREE.DirectionalLight(0xd6e2ff, 5.5);
+rimCool.position.set(-2.6, 2.4, -4);
+const rimWarm = new THREE.DirectionalLight(0xffe2c6, 3.6);
+rimWarm.position.set(2.8, 2.2, -3.6);
+scene.add(key, rimCool, rimWarm);
+
+// the page is the table: white background, the floor only catches shadows
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40).rotateX(-Math.PI / 2), new THREE.ShadowMaterial({ opacity: 0.16 }));
+floor.receiveShadow = true;
+scene.add(floor);
+
+// soft contact blobs (ambient occlusion under the kitten, the board and the yarn)
+const blobGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+const blobMat = new THREE.ShaderMaterial({
+  uniforms: { opacity: { value: 1 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform float opacity; varying vec2 vUv;
+    void main() {
+      vec2 p = (vUv - 0.5) * 2.0; float d2 = dot(p, p);
+      float a = (0.6 * exp(-d2 * 3.0) + 0.4 * exp(-d2 * 9.0)) * opacity * (1.0 - smoothstep(0.75, 1.0, sqrt(d2)));
+      gl_FragColor = vec4(vec3(1.0 - 0.55 * a), 1.0);
+      #include <colorspace_fragment>
+    }`,
+  blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor,
+  depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+});
+function blob(opacity) {
+  const m = new THREE.Mesh(blobGeo, blobMat.clone());
+  m.material.uniforms.opacity.value = opacity;
+  m.renderOrder = 1;
+  m.position.y = 0.002;
+  scene.add(m);
+  return m;
+}
+
+/* =====================================================================
+   Keyboard meshes
+   ===================================================================== */
+const EYES = [
+  { name: 'Âmbar', hex: '#f2a516' },
+  { name: 'Verde', hex: '#9cc43b' },
+  { name: 'Cobre', hex: '#d2702c' },
+  { name: 'Azul', hex: '#6aa7e0' },
+];
+const keyboard = new THREE.Group();
+scene.add(keyboard);
+{
+  const body = new THREE.Mesh(new RoundedBoxGeometry(CASE_W, CASE_H, CASE_D, 4, 0.016),
+    new THREE.MeshStandardMaterial({ color: 0xd2cec7, roughness: 0.45, metalness: 0.25 }));
+  body.position.y = CASE_H / 2;
+  body.castShadow = body.receiveShadow = true;
+  const plate = new THREE.Mesh(new THREE.PlaneGeometry(1.52, 0.52).rotateX(-Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0x77736d, roughness: 0.7 }));
+  plate.position.y = CASE_H + 0.0004;
+  plate.receiveShadow = true;
+  keyboard.add(body, plate);
+  blob(0.9).scale.set(2.1, 1, 0.95);
+}
+// legends for the whole board on one canvas, sampled by key-cap tops in board space
+const LEG_MIN = [KB_X0 - 0.01, KB_Z0 - 0.01], LEG_SIZE = [1.52, 0.52];
+const legendTex = (() => {
+  const W = 2048, Hc = Math.round(W * LEG_SIZE[1] / LEG_SIZE[0]), cv = document.createElement('canvas');
+  cv.width = W; cv.height = Hc;
+  const g = cv.getContext('2d'), s = W / LEG_SIZE[0];
+  g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const k of keys) {
+    if (k.label === 'space') continue;
+    const big = !k.mod;
+    g.font = `${big ? 600 : 500} ${big ? 34 : 21}px "Avenir Next", Avenir, "Helvetica Neue", Arial, sans-serif`;
+    g.fillText(k.label, (k.x - LEG_MIN[0]) * s, (k.z - LEG_MIN[1]) * s - 4);
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.anisotropy = 8;
+  return t;
+})();
+const capGeo = (() => {
+  const geo = new RoundedBoxGeometry(0.088, KEY_H, 0.088, 2, 0.01), p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) if (p.getY(i) > 0) { p.setX(i, p.getX(i) * 0.84); p.setZ(i, p.getZ(i) * 0.84); }   // sculpted, narrower top
+  geo.computeVertexNormals();
+  return geo;
+})();
+const capMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55 });
+const legendUniforms = { uLegend: { value: legendTex }, uKbMin: { value: new THREE.Vector2(...LEG_MIN) }, uKbSize: { value: new THREE.Vector2(...LEG_SIZE) } };
+capMat.onBeforeCompile = s => {
+  Object.assign(s.uniforms, legendUniforms);
+  s.vertexShader = s.vertexShader
+    .replace('#include <common>', '#include <common>\nuniform vec2 uKbMin, uKbSize;\nvarying vec2 vLegUv;\nvarying float vTop;\nvarying float vDark;')
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      vec4 kbp = instanceMatrix * vec4(position, 1.0);
+      vLegUv = vec2((kbp.x - uKbMin.x) / uKbSize.x, (uKbMin.y + uKbSize.y - kbp.z) / uKbSize.y);
+      vTop = normal.y;
+      vDark = instanceColor.r + instanceColor.g + instanceColor.b < 2.6 ? 1.0 : 0.0;`);
+  s.fragmentShader = s.fragmentShader
+    .replace('#include <common>', '#include <common>\nuniform sampler2D uLegend;\nvarying vec2 vLegUv;\nvarying float vTop;\nvarying float vDark;')
+    .replace('#include <color_fragment>', `#include <color_fragment>
+      float leg = texture2D(uLegend, vLegUv).a * smoothstep(0.86, 0.97, vTop);
+      diffuseColor.rgb = mix(diffuseColor.rgb, mix(vec3(0.045, 0.043, 0.04), vec3(1.0), step(0.5, vDark) * step(diffuseColor.r + diffuseColor.g + diffuseColor.b, 1.9)), leg);`);
+};
+const caps = new THREE.InstancedMesh(capGeo, capMat, keys.length);
+caps.castShadow = caps.receiveShadow = true;
+caps.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+const CAP_LIGHT = new THREE.Color('#f2efe9'), CAP_DARK = new THREE.Color('#dedad2');
+keys.forEach((k, i) => caps.setColorAt(i, k.mod ? CAP_DARK : CAP_LIGHT));
+keyboard.add(caps);
+const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3();
+function placeKeys(force) {
+  let dirty = false;
+  keys.forEach((k, i) => {
+    const d = Math.round(k.d * 4000);
+    if (!force && d === k.shown) return;
+    k.shown = d;
+    caps.setMatrixAt(i, _m4.compose(_p.set(k.x, KEY_BASE + KEY_H / 2 - k.d, k.z), _q, _s.set((k.w * U - 0.012) / 0.088, 1, 1)));
+    dirty = true;
+  });
+  if (dirty) caps.instanceMatrix.needsUpdate = true;
+}
+placeKeys(true);
+
+/* =====================================================================
+   Materials for the kitten
+   ===================================================================== */
+const furMat = new THREE.MeshPhysicalMaterial({
+  color: 0x0c0c0e, roughness: 0.8, sheen: 1, sheenRoughness: 0.5, sheenColor: new THREE.Color('#47506b'), envMapIntensity: 0.55,
+});
+const pinkMat = new THREE.MeshPhysicalMaterial({ color: 0xe39aa6, roughness: 0.5, sheen: 0.4, sheenColor: new THREE.Color('#ffd6dc') });
+const mouthMat = new THREE.MeshStandardMaterial({ color: 0x6e2232, roughness: 0.6 });
+const irisUniforms = { uIris: { value: new THREE.Color(EYES[0].hex) }, uPupil: { value: 0.35 } };
+const irisMat = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.04 });
+irisMat.onBeforeCompile = s => {
+  Object.assign(s.uniforms, irisUniforms);
+  s.vertexShader = s.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vEyeP;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvEyeP = position;');
+  s.fragmentShader = s.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vEyeP;\nuniform vec3 uIris;\nuniform float uPupil;')
+    .replace('#include <color_fragment>', `#include <color_fragment>
+      vec3 ep = normalize(vEyeP);
+      float ed = length(ep.xy), front = smoothstep(0.0, 0.3, ep.z);
+      float iris = (1.0 - smoothstep(0.9, 0.96, ed)) * front;
+      float ang = atan(ep.y, ep.x);
+      float streak = 0.82 + 0.18 * sin(ang * 37.0) * sin(ang * 11.0 + ed * 9.0);
+      vec3 ic = mix(uIris * 1.4, uIris * 0.55, smoothstep(0.12, 0.9, ed)) * streak;
+      ic = mix(ic, uIris * 0.2, smoothstep(0.8, 0.94, ed));
+      float pw = mix(0.07, 0.6, uPupil);
+      float pupil = (1.0 - smoothstep(0.9, 1.0, length(vec2(ep.x / pw, ep.y / 0.64)))) * front;
+      vec3 eyeCol = mix(mix(vec3(0.01), ic, iris), vec3(0.0), pupil);
+      diffuseColor.rgb = eyeCol;`)
+    .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += eyeCol * 0.25 * iris * (1.0 - pupil);');
+};
+const corneaMat = new THREE.MeshPhysicalMaterial({
+  color: 0xffffff, transmission: 1, roughness: 0.02, ior: 1.38, thickness: 0.03, clearcoat: 1, clearcoatRoughness: 0.02, specularIntensity: 1,
+});
+
+/* =====================================================================
+   The kitten body
+   ===================================================================== */
+const kit = {
+  x: new Float64Array(NP*3), p: new Float64Array(NP*3), v: new Float64Array(NP*3),
+  qr: [0, 0, 0, 1], R: new Float64Array([1,0,0, 0,1,0, 0,0,1]), An: new Float64Array(9), c: [0, 0, 0],
+  M: new Float64Array([1,0,0, 0,1,0, 0,0,1]), Minv: new Float64Array([1,0,0, 0,1,0, 0,0,1]), sk: 1, groundK: 1,
+  wc: FITW, wa: FITW, wLean: 0, Q: new Float64Array(NP*3), Ainv: new Float64Array(9),
+  goal: [0, 0, 0], err: new Float64Array(NP), contact: new Uint8Array(NP), pl: new Float64Array(NP*3),
+  meshO: [0, 0, 0], meshBox: [], strandR: new Float64Array(STRANDS.length * 2), stretch: 1, grab: -1, grabMinY: 0, settle: 0, air: 0, vyc: 0, yaw: 0,
+};
+function resetKitten() {
+  for (let i = 0; i < NP*3; i++) { kit.x[i] = RESTL[i] + HOME[i % 3]; kit.v[i] = 0; }
+  kit.p.set(kit.x);
+  kit.qr = [0, 0, 0, 1];
+  restFrame(kit.wc, kit.wa, RESTL, kit.Q, kit.Ainv);
+}
+resetKitten();
+const furMC = new MarchingCubes(RES, furMat, false, false, MAX_POLY);
+furMC.isolation = 0;
+furMC.frustumCulled = false;
+furMC.castShadow = furMC.receiveShadow = true;
+furMC.geometry.boundingSphere.radius = 1.8;
+const kitGroup = new THREE.Group();
+kitGroup.add(furMC);
+scene.add(kitGroup);
+const kitBlob = blob(0.8);
+
+const Apq = new Float64Array(9);
+function fit(b) {
+  const x = b.x, wc = b.wc, wa = b.wa, Q = b.Q;
+  let M = 0, cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < NP; i++) { const w = wc[i], k = i*3; M += w; cx += w*x[k]; cy += w*x[k+1]; cz += w*x[k+2]; }
+  cx /= M; cy /= M; cz /= M;
+  Apq.fill(0);
+  const acc = (i, w) => {
+    const k = i*3, px = w*(x[k]-cx), py = w*(x[k+1]-cy), pz = w*(x[k+2]-cz), qx = Q[k], qy = Q[k+1], qz = Q[k+2];
+    Apq[0] += px*qx; Apq[1] += px*qy; Apq[2] += px*qz;
+    Apq[3] += py*qx; Apq[4] += py*qy; Apq[5] += py*qz;
+    Apq[6] += pz*qx; Apq[7] += pz*qy; Apq[8] += pz*qz;
+  };
+  for (let i = 0; i < NP; i++) if (i !== b.grab) acc(i, wa[i]);
+  // a held paw only nudges the rotation (a lean), but stretches the goal shape
+  if (b.grab >= 0) acc(b.grab, b.wLean);
+  extractRotation(b.qr, Apq, b.R, 4);
+  if (b.grab >= 0) acc(b.grab, wa[b.grab] - b.wLean);
+  // volume-preserving squash/stretch along the body's own axes (shear stays stiff)
+  const I = b.Ainv, A = b.An, R = b.R;
+  let sx = 0, sy = 0, sz = 0;
+  for (let k = 0; k < 3; k++) {
+    sx += R[k*3]   * (Apq[k*3]*I[0] + Apq[k*3+1]*I[3] + Apq[k*3+2]*I[6]);
+    sy += R[k*3+1] * (Apq[k*3]*I[1] + Apq[k*3+1]*I[4] + Apq[k*3+2]*I[7]);
+    sz += R[k*3+2] * (Apq[k*3]*I[2] + Apq[k*3+1]*I[5] + Apq[k*3+2]*I[8]);
+  }
+  sx = clamp(sx, 0.35, 2.4); sy = clamp(sy, 0.35, 2.4); sz = clamp(sz, 0.35, 2.4);
+  const sc = 1 / Math.cbrt(sx * sy * sz);
+  sx *= sc; sy *= sc; sz *= sc;
+  for (let k = 0; k < 3; k++) { A[k*3] = R[k*3] * sx; A[k*3+1] = R[k*3+1] * sy; A[k*3+2] = R[k*3+2] * sz; }
+  b.c[0] = cx; b.c[1] = cy; b.c[2] = cz;
+}
+
+const GM = new Float64Array(9), OFS = [0, 0, 0];
+// rotate the goal shape (GM and the offset OFS) about the centroid c by angle a around unit axis (x, y, z)
+function turnGoals(c, x, y, z, a) {
+  const cs = Math.cos(a), sn = Math.sin(a), t = 1 - cs;
+  const r = [t*x*x + cs, t*x*y - sn*z, t*x*z + sn*y, t*x*y + sn*z, t*y*y + cs, t*y*z - sn*x, t*x*z - sn*y, t*y*z + sn*x, t*z*z + cs];
+  for (let col = 0; col < 3; col++) {
+    const a0 = GM[col], a1 = GM[3+col], a2 = GM[6+col];
+    GM[col] = r[0]*a0 + r[1]*a1 + r[2]*a2; GM[3+col] = r[3]*a0 + r[4]*a1 + r[5]*a2; GM[6+col] = r[6]*a0 + r[7]*a1 + r[8]*a2;
+  }
+  const dx = OFS[0] - c[0], dy = OFS[1] - c[1], dz = OFS[2] - c[2];
+  OFS[0] = c[0] + r[0]*dx + r[1]*dy + r[2]*dz; OFS[1] = c[1] + r[3]*dx + r[4]*dy + r[5]*dz; OFS[2] = c[2] + r[6]*dx + r[7]*dy + r[8]*dz;
+}
+function shapeMatch(b, alpha) {
+  fit(b);
+  const x = b.x, Q = b.Q, R = b.R, A = b.An, c = b.c, be = BETA, ib = 1 - be;
+  for (let j = 0; j < 9; j++) GM[j] = ib*R[j] + be*A[j];
+  // squash about whatever touches the table, so a landing or a press keeps the feet planted
+  let pw = 0, px = 0, py = 0, pz = 0;
+  for (let i = 0; i <= BELLY; i++) if (b.contact[i]) { const w = MASS[i], k = i*3; pw += w; px += w*Q[k]; py += w*Q[k+1]; pz += w*Q[k+2]; }
+  OFS[0] = c[0]; OFS[1] = c[1]; OFS[2] = c[2];
+  if (pw > 0) {
+    px /= pw; py /= pw; pz /= pw;
+    for (let r = 0; r < 3; r++) OFS[r] += (R[r*3]-GM[r*3])*px + (R[r*3+1]-GM[r*3+1])*py + (R[r*3+2]-GM[r*3+2])*pz;
+  }
+  // A cat on the table gets back on its feet, turns and walks home. All of it steers the goal shape a
+  // little each step: a push that static friction cannot pin down, unlike a push on the velocities.
+  if (b.air === 0) {
+    const ux = R[1], uy = R[4], uz = R[7], ax = -uz, az = ux, s = Math.hypot(ax, az);   // axis = up x Y
+    if (s > 1e-4) turnGoals(c, ax / s, 0, az / s, Math.min(Math.atan2(s, uy) * 0.03, 1.8 * H));
+  }
+  if (b.grab < 0 && b.air === 0) {
+    if (mind.yawTarget !== null) turnGoals(c, 0, 1, 0, clamp(wrap(mind.yawTarget - b.yaw) * 0.03, -1.6 * H, 1.6 * H));
+    if (mind.home) {
+      const hx = HOME[0] + REST_C[0] - c[0], hz = HOME[2] + REST_C[2] - c[2], hd = Math.hypot(hx, hz), st = Math.min(hd * 0.02, 0.5 * H);
+      if (hd > 1e-4) { OFS[0] += hx / hd * st; OFS[2] += hz / hd * st; }
+    }
+  }
+  const [g0, g1, g2, g3, g4, g5, g6, g7, g8] = GM, ox = OFS[0], oy = OFS[1], oz = OFS[2];
+  for (let i = 0; i < NP; i++) {
+    const k = i*3, qx = Q[k], qy = Q[k+1], qz = Q[k+2];
+    const gx = ox + g0*qx + g1*qy + g2*qz, gy = oy + g3*qx + g4*qy + g5*qz, gz = oz + g6*qx + g7*qy + g8*qz;
+    if (i === b.grab) { b.goal[0] = gx; b.goal[1] = gy; b.goal[2] = gz; b.err[i] = 0; continue; }
+    b.err[i] = Math.hypot(gx - x[k], gy - x[k+1], gz - x[k+2]);
+    const s = alpha * SOFT[i];
+    x[k] += (gx - x[k]) * s; x[k+1] += (gy - x[k+1]) * s; x[k+2] += (gz - x[k+2]) * s;
+  }
+  // the tail is a chain: keep its links from stretching
+  for (let it = 0; it < 2; it++) for (const [a, bb, L] of TAIL_LINKS) {
+    const ka = a*3, kb = bb*3, dx = x[kb]-x[ka], dy = x[kb+1]-x[ka+1], dz = x[kb+2]-x[ka+2], d = Math.hypot(dx, dy, dz) || 1;
+    const wa = a === HIP ? 0.05 : 0.5, wb = 1 - wa, e = (d - L) / d;
+    x[ka] += dx*e*wa; x[ka+1] += dy*e*wa; x[ka+2] += dz*e*wa;
+    x[kb] -= dx*e*wb; x[kb+1] -= dy*e*wb; x[kb+2] -= dz*e*wb;
+  }
+}
+
+/* ---------- collisions ---------- */
+const SAMPLES = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.6], [0, -0.6]];
+// a sphere against the board: from the side it is pushed out, from above it rides on (and presses) the keys
+function keyboardCollide(arr, k, r, prev) {
+  const x = arr[k], y = arr[k+1], z = arr[k+2], hx = CASE_W / 2 + r, hz = CASE_D / 2 + r;
+  if (x < -hx || x > hx || z < -hz || z > hz || y - r > KEY_TOP) return false;
+  if (y < KEY_TOP - 0.012) {
+    const px = hx - Math.abs(x), pz = hz - Math.abs(z);
+    if (px < pz) arr[k] = Math.sign(x) * hx; else arr[k+2] = Math.sign(z) * hz;
+    return true;
+  }
+  let lift = 0, bottomed = false;
+  for (const [sx, sz] of SAMPLES) {
+    const dx = sx * r, dz = sz * r, bottom = y - Math.sqrt(r*r - dx*dx - dz*dz), ki = keyAt(x + dx, z + dz);
+    const top = ki < 0 ? KEY_TOP : KEY_TOP - keys[ki].d;
+    if (bottom >= top) continue;
+    if (ki < 0) { lift = Math.max(lift, top - bottom); bottomed = true; continue; }
+    const kk = keys[ki], want = KEY_TOP - bottom;
+    if (want >= TRAVEL) bottomed = true;
+    kk.contact = true;
+    kk.target = Math.max(kk.target, Math.min(want, TRAVEL));
+    lift = Math.max(lift, Math.max(0, want - TRAVEL) + KEY_SPRING * Math.min(want, TRAVEL));
+  }
+  if (lift > 0) {
+    arr[k+1] = y + lift;
+    if (prev) {                                   // key caps are grippy: paws don't skate across them
+      const muS = mind.slip ? 0.12 : MU_S, muK = mind.slip ? 0.2 : MU_K;
+      const tx = x - prev[k], tz = z - prev[k+2], tl = Math.hypot(tx, tz);
+      if (tl < muS * lift) { arr[k] = prev[k]; arr[k+2] = prev[k+2]; }
+      else { const f = muK * lift / tl; arr[k] -= tx * f; arr[k+2] -= tz * f; }
+    }
+  }
+  return lift > 0 ? (bottomed ? 2 : 1) : 0;   // 2: resting on something hard (bottomed key or the case)
+}
+let planes = [];
+function walls(arr, k, r) {
+  for (const P of planes) {
+    const s = P.nx*arr[k] + P.ny*arr[k+1] + P.nz*arr[k+2] + P.d - r;
+    if (s < 0) { arr[k] -= P.nx*s; arr[k+1] -= P.ny*s; arr[k+2] -= P.nz*s; }
+  }
+}
+function boundaries(b) {
+  const x = b.x, p = b.p, gk = b.groundK, slip = mind.slip;
+  const muS = slip ? 0.12 : MU_S, muK = slip ? 0.2 : MU_K;
+  let contacts = 0;
+  for (let i = 0; i < NP; i++) {
+    const k = i*3, r = RAD[i], rg = r * (i < T0 ? gk : 1);
+    b.contact[i] = x[k+1] < rg + 0.004 ? 1 : 0;
+    if (x[k+1] < rg) {
+      const depth = rg - x[k+1];
+      x[k+1] = rg; contacts++;
+      const tx = x[k]-p[k], tz = x[k+2]-p[k+2], tl = Math.hypot(tx, tz);
+      if (tl < muS * depth) { x[k] = p[k]; x[k+2] = p[k+2]; }
+      else { const f = muK * depth / tl; x[k] -= tx*f; x[k+2] -= tz*f; }
+    }
+    if (keyboardCollide(x, k, r, p)) { b.contact[i] = 1; if (i < T0) contacts++; }
+    if (i !== b.grab) walls(x, k, r);
+  }
+  return contacts;
+}
+function dampRelative(b, kr, kw, kl) {
+  const x = b.x, v = b.v, m = MASS;
+  let M = 0, cx = 0, cy = 0, cz = 0, ux = 0, uy = 0, uz = 0;
+  // the body's own motion, measured without the paws and tail (a tapping paw must not shake the cat)
+  for (let i = 0; i < PAW_L; i++) {
+    const w = m[i], j = i*3; M += w; cx += w*x[j]; cy += w*x[j+1]; cz += w*x[j+2]; ux += w*v[j]; uy += w*v[j+1]; uz += w*v[j+2];
+  }
+  cx /= M; cy /= M; cz /= M; ux /= M; uy /= M; uz /= M;
+  let Lx = 0, Ly = 0, Lz = 0;
+  const I = Apq; I.fill(0);
+  for (let i = 0; i < PAW_L; i++) {
+    const w = m[i], j = i*3, rx = x[j]-cx, ry = x[j+1]-cy, rz = x[j+2]-cz, vx = v[j], vy = v[j+1], vz = v[j+2];
+    Lx += w*(ry*vz - rz*vy); Ly += w*(rz*vx - rx*vz); Lz += w*(rx*vy - ry*vx);
+    const r2 = rx*rx + ry*ry + rz*rz;
+    I[0] += w*(r2 - rx*rx); I[4] += w*(r2 - ry*ry); I[8] += w*(r2 - rz*rz);
+    I[1] -= w*rx*ry; I[2] -= w*rx*rz; I[5] -= w*ry*rz;
+  }
+  I[3] = I[1]; I[6] = I[2]; I[7] = I[5];
+  if (!inv3(I, dampInv)) return;
+  const Ii = dampInv;
+  const wx = Ii[0]*Lx + Ii[1]*Ly + Ii[2]*Lz, wy = Ii[3]*Lx + Ii[4]*Ly + Ii[5]*Lz, wz = Ii[6]*Lx + Ii[7]*Ly + Ii[8]*Lz;
+  for (let i = 0; i < NP; i++) {
+    if (i === b.grab) continue;
+    const j = i*3, rx = x[j]-cx, ry = x[j+1]-cy, rz = x[j+2]-cz;
+    const sx = wy*rz - wz*ry, sy = wz*rx - wx*rz, sz = wx*ry - wy*rx;
+    // far from its goal a point is damped hard (a stretched leg returns like heavy rubber); the tail keeps its whip
+    const k = kr + (i < T0 ? FAR_DAMP * clamp((b.err[i] - 0.04) / 0.3, 0, 1) : 0);
+    v[j]   += (ux + sx - v[j])   * k - sx * kw - (ux + sx) * kl;
+    v[j+1] += (uy + sy - v[j+1]) * k - sy * kw - (uy + sy) * kl;
+    v[j+2] += (uz + sz - v[j+2]) * k - sz * kw - (uz + sz) * kl;
+  }
+}
+const dampInv = new Float64Array(9);
+function addVel(vx, vy, vz, wx = 0, wy = 0, wz = 0) {
+  const x = kit.x, v = kit.v, c = kit.c;
+  for (let i = 0; i < NP; i++) {
+    const k = i*3, rx = x[k]-c[0], ry = x[k+1]-c[1], rz = x[k+2]-c[2];
+    v[k] += vx + wy*rz - wz*ry; v[k+1] += vy + wz*rx - wx*rz; v[k+2] += vz + wx*ry - wy*rx;
+  }
+}
+function steer() { kit.yaw = Math.atan2(kit.R[2], kit.R[8]); }
+
+/* =====================================================================
+   Yarn balls (and their trailing thread)
+   ===================================================================== */
+const YARN_R = 0.085, YARN_MASS = 0.25;
+const yarnTex = (() => {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#9a9a9a'; g.fillRect(0, 0, 512, 256);
+  for (let n = 0; n < 900; n++) {
+    const y0 = Math.random() * 256, a = rand(-0.9, 0.9), len = rand(60, 260), x0 = Math.random() * 512, w = rand(1.5, 3.5);
+    g.strokeStyle = `rgba(${Math.random() < 0.5 ? '255,255,255' : '40,40,40'},${rand(0.15, 0.4)})`;
+    g.lineWidth = w;
+    g.beginPath();
+    for (let s = 0; s <= 1.0001; s += 0.05) {
+      const xx = x0 + s * len, yy = y0 + Math.sin(s * 3 + a * 4) * 18 + s * len * a * 0.5;
+      s === 0 ? g.moveTo(xx, yy) : g.lineTo(xx, yy);
+    }
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+})();
+const YARN_COLORS = ['#b8395c', '#d9a52c', '#2f8f8a'];
+const balls = [];
+let yarnCount = 0;
+function makeTubeGeo(segments, radial) {
+  const geo = new THREE.BufferGeometry(), n = (segments + 1) * (radial + 1), idx = [];
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * 3), 3).setUsage(THREE.DynamicDrawUsage));
+  for (let i = 0; i < segments; i++) for (let j = 0; j < radial; j++) {
+    const a = i * (radial + 1) + j, b2 = a + radial + 1;
+    idx.push(a, b2, a + 1, b2, b2 + 1, a + 1);
+  }
+  geo.setIndex(idx);
+  geo.userData = { segments, radial };
+  return geo;
+}
+const _curve = new THREE.CatmullRomCurve3([], false, 'centripetal');
+const _tp = new THREE.Vector3(), _tt = new THREE.Vector3(), _tn = new THREE.Vector3(), _tb = new THREE.Vector3();
+function updateTube(geo, pts, radiusAt) {
+  const { segments, radial } = geo.userData, P = geo.attributes.position.array, N = geo.attributes.normal.array;
+  _curve.points = pts;
+  _curve.getTangent(0, _tt);
+  _tn.set(0, 1, 0);
+  if (Math.abs(_tn.dot(_tt)) > 0.9) _tn.set(1, 0, 0);
+  let o = 0;
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    _curve.getPoint(t, _tp); _curve.getTangent(t, _tt);
+    _tn.addScaledVector(_tt, -_tn.dot(_tt)).normalize();             // parallel transport of the ring frame
+    _tb.crossVectors(_tt, _tn);
+    const r = radiusAt(t);
+    for (let j = 0; j <= radial; j++) {
+      const a = j / radial * Math.PI * 2, cs = Math.cos(a), sn = Math.sin(a);
+      const nx = _tn.x*cs + _tb.x*sn, ny = _tn.y*cs + _tb.y*sn, nz = _tn.z*cs + _tb.z*sn;
+      P[o] = _tp.x + nx*r; P[o+1] = _tp.y + ny*r; P[o+2] = _tp.z + nz*r;
+      N[o] = nx; N[o+1] = ny; N[o+2] = nz;
+      o += 3;
+    }
+  }
+  geo.attributes.position.needsUpdate = geo.attributes.normal.needsUpdate = true;
+}
+const ROPE_N = 22, ROPE_SEG = 0.032;
+function throwYarn() {
+  if (balls.length >= 3) balls[0].dying = 0.3;
+  const side = yarnCount++ % 2 ? 1 : -1, color = new THREE.Color(YARN_COLORS[yarnCount % 3]);
+  const land = [side * rand(0.55, 0.75), YARN_R, rand(-0.6, -0.35)], T = 0.5;
+  const b = { x: new Float64Array([land[0] + side * 0.2, 1.5, land[2] + 0.15]), p: null, v: new Float64Array(3), q: new THREE.Quaternion(), held: false, dying: 0, hunts: 0, still: 0 };
+  b.v[0] = (land[0] - b.x[0]) / T; b.v[2] = (land[2] - b.x[2]) / T; b.v[1] = (land[1] - b.x[1]) / T + 0.5 * GRAV * T;
+  b.p = new Float64Array(b.x);
+  b.mesh = new THREE.Mesh(new THREE.SphereGeometry(YARN_R, 40, 28),
+    new THREE.MeshPhysicalMaterial({ color, map: yarnTex, bumpMap: yarnTex, bumpScale: 2.2, roughness: 0.92, sheen: 0.6, sheenColor: color.clone().lerp(new THREE.Color(1, 1, 1), 0.5) }));
+  b.mesh.castShadow = true;
+  b.rope = Array.from({ length: ROPE_N }, (_, i) => new THREE.Vector3(b.x[0] - side * i * ROPE_SEG, b.x[1], b.x[2]));
+  b.ropePrev = b.rope.map(v => v.clone());
+  b.ropeMesh = new THREE.Mesh(makeTubeGeo(48, 5), new THREE.MeshStandardMaterial({ color, roughness: 0.9 }));
+  b.ropeMesh.castShadow = true;
+  b.ropeMesh.frustumCulled = false;
+  b.blob = blob(0.7);
+  scene.add(b.mesh, b.ropeMesh);
+  balls.push(b);
+}
+function ballStep(b, h, target) {
+  const x = b.x, p = b.p, v = b.v;
+  p.set(x);
+  if (target) { x[0] = target.x; x[1] = Math.max(target.y, YARN_R); x[2] = target.z; }
+  else { v[1] -= GRAV * h; x[0] += v[0]*h; x[1] += v[1]*h; x[2] += v[2]*h; }
+}
+function ballCollide(b, h) {
+  const x = b.x, p = b.p, r = YARN_R;
+  let ground = false;
+  if (x[1] < r) { x[1] = r; ground = true; }
+  if (keyboardCollide(x, 0, r, p) === 2) ground = true;      // keys give way first, then it bounces
+  // kitten: the cat's muscles make its parts much heavier than the yarn
+  const kx = kit.x, wb = 1 / YARN_MASS;
+  for (let i = 0; i < NP; i++) {
+    const k = i*3, dx = x[0]-kx[k], dy = x[1]-kx[k+1], dz = x[2]-kx[k+2], rr = r + RAD[i] + 0.005, d2 = dx*dx + dy*dy + dz*dz;
+    if (d2 >= rr*rr) continue;
+    const d = Math.sqrt(d2) || 1e-6, pen = rr - d, wp = i === kit.grab ? 0 : 1 / (MASS[i] * 8), ws = (b.held ? 0 : wb) + wp;
+    if (ws === 0) continue;
+    const sa = pen * (b.held ? 0 : wb) / ws, sb = pen * wp / ws;
+    x[0] += dx/d*sa; x[1] += dy/d*sa; x[2] += dz/d*sa;
+    kx[k] -= dx/d*sb; kx[k+1] -= dy/d*sb; kx[k+2] -= dz/d*sb;
+  }
+  for (const o of balls) {
+    if (o === b) continue;
+    const dx = x[0]-o.x[0], dy = x[1]-o.x[1], dz = x[2]-o.x[2], d = Math.hypot(dx, dy, dz);
+    if (d > 0 && d < 2*r) { const e = (2*r - d) / d * 0.5; x[0] += dx*e; x[1] += dy*e; x[2] += dz*e; o.x[0] -= dx*e; o.x[1] -= dy*e; o.x[2] -= dz*e; }
+  }
+  walls(x, 0, r);
+  if (b.held) return;
+  const vy0 = b.v[1];
+  for (let a = 0; a < 3; a++) b.v[a] = (x[a] - p[a]) / h;
+  if (ground) {
+    if (vy0 < -1.2 && b.v[1] < 0.5) b.v[1] = -vy0 * 0.38;            // a soft bounce
+    const f = 1 - 1.6 * h; b.v[0] *= f; b.v[2] *= f;                  // rolling resistance
+  }
+}
+function ballVisual(b, dt) {
+  const x = b.x, sp = Math.hypot(b.v[0], b.v[2]);
+  if (sp > 1e-4 && x[1] < YARN_R + 0.05) {                            // roll without slipping
+    _p.set(b.v[2], 0, -b.v[0]).normalize();
+    _q.setFromAxisAngle(_p, sp * dt / YARN_R);
+    b.q.premultiply(_q);
+  }
+  const s = b.dying ? Math.max(0.001, b.dying / 0.3) : 1;
+  b.mesh.position.set(x[0], x[1], x[2]);
+  b.mesh.quaternion.copy(b.q);
+  b.mesh.scale.setScalar(s);
+  // thread: verlet rope fixed to a point on the ball
+  const R = b.rope, Pv = b.ropePrev;
+  _p.set(0, 0, YARN_R * 0.95).applyQuaternion(b.q).add(b.mesh.position);
+  R[0].copy(_p); Pv[0].copy(_p);
+  for (let i = 1; i < ROPE_N; i++) {
+    const c = R[i], vx = (c.x - Pv[i].x) * 0.92, vy = (c.y - Pv[i].y) * 0.92, vz = (c.z - Pv[i].z) * 0.92;
+    Pv[i].copy(c);
+    c.x += vx; c.y += vy - GRAV * dt * dt; c.z += vz;
+  }
+  for (let it = 0; it < 6; it++) {
+    for (let i = 1; i < ROPE_N; i++) {
+      const a = R[i-1], c = R[i], dx = c.x - a.x, dy = c.y - a.y, dz = c.z - a.z, d = Math.hypot(dx, dy, dz) || 1, e = (d - ROPE_SEG) / d;
+      if (i === 1) { c.x -= dx*e; c.y -= dy*e; c.z -= dz*e; }
+      else { a.x += dx*e*0.5; a.y += dy*e*0.5; a.z += dz*e*0.5; c.x -= dx*e*0.5; c.y -= dy*e*0.5; c.z -= dz*e*0.5; }
+    }
+    for (let i = 1; i < ROPE_N; i++) {
+      const c = R[i], onKb = Math.abs(c.x) < CASE_W / 2 && Math.abs(c.z) < CASE_D / 2;
+      const floorY = (onKb ? KEY_TOP : 0) + 0.005;
+      if (c.y < floorY) { c.y = floorY; Pv[i].x += (c.x - Pv[i].x) * 0.4; Pv[i].z += (c.z - Pv[i].z) * 0.4; }
+    }
+  }
+  updateTube(b.ropeMesh.geometry, R, () => 0.0045 * s);
+  b.blob.position.set(x[0] + 0.25 * (x[1] - YARN_R), 0.002, x[2] - 0.3 * (x[1] - YARN_R));
+  const hgt = Math.max(0, x[1] - YARN_R);
+  b.blob.scale.set(0.36 * (1 + hgt), 1, 0.36 * (1 + hgt));
+  b.blob.material.uniforms.opacity.value = 0.8 * Math.exp(-hgt * 1.5) * s;
+}
+function removeBall(b) {
+  scene.remove(b.mesh, b.ropeMesh, b.blob);
+  b.mesh.geometry.dispose(); b.mesh.material.dispose(); b.ropeMesh.geometry.dispose(); b.ropeMesh.material.dispose(); b.blob.material.dispose();
+  balls.splice(balls.indexOf(b), 1);
+}
+
+/* =====================================================================
+   Typing output, counters and sound
+   ===================================================================== */
+let typed = '', capsOn = false;
+const pressTimes = [];
+function emitKey(k) {
+  const L = k.label, shift = keys.some(o => o.label === 'shift' && o.down);
+  if (L === 'backspace') typed = typed.slice(0, -1);
+  else if (L === 'space') typed += ' ';
+  else if (L === 'tab') typed += '  ';
+  else if (L === 'enter') typed += '\n';
+  else if (L === 'caps') capsOn = !capsOn;
+  else if (!k.mod) typed += (shift && SHIFTED[L]) || ((shift !== capsOn) ? L.toUpperCase() : L);
+  if (typed.length > 600) typed = typed.slice(-300);
+}
+function keyDown(k) {
+  if (sim.time < 0.8) return;                   // the kitten settling onto the keys at load is not typing
+  pressTimes.push(sim.time);
+  emitKey(k);
+  click(k);
+}
+function keysFrame(dt) {
+  for (const k of keys) {
+    if (!k.down || k.mod && k.label !== 'backspace' && k.label !== 'space') continue;
+    k.held += dt;
+    if (k.held < 0.45) continue;
+    k.rep += dt;
+    while (k.rep > 0.065) { k.rep -= 0.065; emitKey(k); }
+  }
+}
+function updateKeys(h) {
+  const KK = (2 * Math.PI * 26) ** 2, KC = 2 * 0.8 * 2 * Math.PI * 26;
+  for (const k of keys) {
+    if (k.contact) { const nd = k.target; k.v = (nd - k.d) / h; k.d = nd; }
+    else { k.v += (-KK * k.d - KC * k.v) * h; k.d += k.v * h; if (k.d < 0) { k.d = 0; k.v = 0; } }
+    if (k.d > TRAVEL) k.d = TRAVEL;
+    k.contact = false; k.target = 0;
+    if (!k.down && k.d > ACT) { k.down = true; k.held = 0; k.rep = 0; keyDown(k); }
+    else if (k.down && k.d < ACT * 0.5) k.down = false;
+  }
+}
+let audio = null, purrAmp = null, noiseBuf = null, soundOn = false;
+function ensureAudio() {
+  if (audio) return audio.resume();
+  audio = new AudioContext();
+  noiseBuf = audio.createBuffer(1, Math.round(audio.sampleRate * 0.06), audio.sampleRate);
+  const nb = noiseBuf.getChannelData(0);
+  for (let i = 0; i < nb.length; i++) nb[i] = Math.random() * 2 - 1;
+  // purr: brown noise through a low-pass, amplitude-modulated at ~24 Hz
+  const len = audio.sampleRate * 2, buf = audio.createBuffer(1, len, audio.sampleRate), d = buf.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < len; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; d[i] = last * 3.5; }
+  const src = audio.createBufferSource(); src.buffer = buf; src.loop = true;
+  const lp = audio.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 220;
+  const am = audio.createGain(); am.gain.value = 0.5;
+  const lfo = audio.createOscillator(); lfo.frequency.value = 24;
+  const lfoG = audio.createGain(); lfoG.gain.value = 0.5;
+  lfo.connect(lfoG).connect(am.gain);
+  purrAmp = audio.createGain(); purrAmp.gain.value = 0;
+  src.connect(lp).connect(am).connect(purrAmp).connect(audio.destination);
+  src.start(); lfo.start();
+}
+function click(k) {
+  if (!soundOn || !audio) return;
+  const t = audio.currentTime, deep = k.label === 'space' || k.w > 1.6;
+  const src = audio.createBufferSource(); src.buffer = noiseBuf;
+  const bp = audio.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = deep ? 1500 : rand(2400, 3600); bp.Q.value = 1.3;
+  const g = audio.createGain();
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.28, t + 0.002); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.045);
+  src.connect(bp).connect(g).connect(audio.destination);
+  src.start(t); src.stop(t + 0.06);
+  const o = audio.createOscillator(), og = audio.createGain();
+  o.frequency.value = deep ? 130 : rand(190, 240);
+  og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime(0.16, t + 0.003); og.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+  o.connect(og).connect(audio.destination);
+  o.start(t); o.stop(t + 0.06);
+}
+
+/* =====================================================================
+   The mind: typing, attention, moods, idle habits, the hunt
+   ===================================================================== */
+const camPos = new THREE.Vector3();
+const mind = {
+  yaw: 0, pitch: -0.4, roll: 0, look: new THREE.Vector3(0, 0.1, -0.1),
+  earBack: 0, earRelax: 0, earFwd: 0, twitch: [0, 0], twitchT: 4,
+  lid: 1, blinkT: 2, blink: 0, pupil: 0.35,
+  purr: 0, purrAcc: 0, happy: 0, lash: 0, puff: 0, mouth: 0, lay: 0, crouch: 0, wiggle: 0, flight: false,
+  action: null, actionT: 0, actionDur: 0, idleT: 7, camT: 5,
+  startleT: 0, irritT: 0, laser: 0, swipeCool: 0,
+  hunt: null, huntCool: 0, yawTarget: 0, home: true, slip: false, atHome: true,
+  paws: [], petLean: new THREE.Vector3(),
+};
+function homeKeyPos(side) {
+  const x = HOME[0] + RESTL[(side ? PAW_R : PAW_L) * 3], z = HOME[2] + RESTL[(side ? PAW_R : PAW_L) * 3 + 2], k = keys[keyAt(x, z)];
+  return new THREE.Vector3(k.x, 0, k.z);
+}
+mind.paws = [0, 1].map(side => ({ i: side ? PAW_R : PAW_L, side, phase: 'rest', t: 0, dur: 0, wait: rand(0.3, 1), driven: true, hover: 0,
+  spot: homeKeyPos(side), from: new THREE.Vector3(), to: new THREE.Vector3(), lift: 0.07, holdDur: 0, deep: 0, goal: new THREE.Vector3() }));
+const overKb = (x, z) => Math.abs(x) < CASE_W / 2 && Math.abs(z) < CASE_D / 2;
+const surfaceY = (x, z) => overKb(x, z) ? KEY_TOP : 0;
+function strike(p, tx, tz, opts = {}) {
+  p.from.copy(p.phase === 'rest' ? p.spot : p.goal).setY(0);
+  p.to.set(tx, 0, tz);
+  p.phase = 'lift'; p.t = 0;
+  p.dur = opts.liftDur ?? rand(0.07, 0.12);
+  p.lift = opts.lift ?? rand(0.05, 0.085);
+  p.holdDur = opts.hold ?? rand(0.04, 0.09);
+  p.deep = opts.deep ?? 0;
+  p.driven = true;
+}
+function typingTarget(p) {
+  const other = mind.paws[1 - p.side], homeX = HOME[0] + RESTL[p.i * 3];
+  const pool = keys.filter(k => (k.row <= 1 || (k.row === 2 && Math.random() < 0.4)) && Math.abs(k.x - homeX) < 0.24 && (!k.mod || Math.random() < 0.12)
+    && Math.hypot(k.x - other.spot.x, k.z - other.spot.z) > 0.12);
+  const k = pool[Math.floor(Math.random() * pool.length)] || keys[keyAt(p.spot.x, p.spot.z)];
+  if (Math.random() < 0.09) {                              // a stomp across two keys
+    const nb = keys[keyAt(k.x + 0.1, k.z)];
+    if (nb && nb.row === k.row) return [k.x + 0.05, k.z, true];
+  }
+  return [k.x, k.z, false];
+}
+function pawGoal(p, dt) {
+  p.t += dt;
+  const r = RAD[p.i];
+  const top = (x, z) => surfaceY(x, z) + r + 0.008 + p.hover, press = (x, z) => surfaceY(x, z) + r - (overKb(x, z) ? TRAVEL + 0.02 : 0.006);
+  if (p.phase === 'lift' && p.t >= p.dur) { p.phase = 'strike'; p.t = 0; p.dur = 0.05; }
+  else if (p.phase === 'strike' && p.t >= p.dur) { p.phase = 'hold'; p.t = 0; }
+  else if (p.phase === 'hold' && p.t >= p.holdDur) { p.phase = 'rest'; p.t = 0; p.spot.copy(p.to); p.wait = nextWait(); }
+  const g = p.goal;
+  if (p.phase === 'rest') g.set(p.spot.x, top(p.spot.x, p.spot.z), p.spot.z);
+  else if (p.phase === 'lift') {
+    const s = smooth(p.t / p.dur);
+    g.lerpVectors(p.from, p.to, s);
+    g.y = Math.max(top(p.from.x, p.from.z), top(p.to.x, p.to.z)) + p.lift * s;
+  } else {
+    const s = p.phase === 'strike' ? clamp(p.t / p.dur, 0, 1) : 1;
+    const hi = Math.max(top(p.from.x, p.from.z), top(p.to.x, p.to.z)) + p.lift;
+    g.set(p.to.x, hi + (press(p.to.x, p.to.z) - p.deep - hi) * s * s, p.to.z);
+  }
+}
+const nextWait = () => rand(0.65, 1.45) * (0.95 - 0.8 * clamp(sim.energy * (mind.irritT > 0 ? 1.5 : 1), 0, 1));
+function startle(fromPoint) {
+  mind.startleT = 1.0; mind.irritT = 3.2; mind.puff = 1; mind.earBack = 1; mind.pupil = 1;
+  mind.action = null; mind.lay = 0;
+  const c = kit.c, ax = c[0] - (fromPoint ? fromPoint.x : c[0]), az = c[2] - (fromPoint ? fromPoint.z : c[2] - 1), l = Math.hypot(ax, az) || 1;
+  addVel(ax / l * 0.6, 2.5, az / l * 0.6);
+  kit.settle = 0;
+}
+function leap(tx, tz, T = 0.38) {
+  const c = kit.c, dx = tx - c[0], dz = tz - c[2], d = Math.hypot(dx, dz), s = d > 1.2 ? 1.2 / d : 1;
+  const vx = dx * s / T, vz = dz * s / T, vy = GRAV * T / 2 + 0.3;
+  for (let i = 0; i < NP; i++) { kit.v[i*3] = vx; kit.v[i*3+1] = vy; kit.v[i*3+2] = vz; }
+  mind.flight = true; kit.settle = 0; kit.air = 0.001;
+}
+function lookYawPitch(target) {
+  // direction from the head (body frame) to the target -> head yaw and pitch
+  const R = kit.R, c = kit.c, dx = target.x - c[0], dy = target.y - c[1], dz = target.z - c[2];
+  const lx = R[0]*dx + R[3]*dy + R[6]*dz - (RESTL[HEAD*3] - REST_C[0]);
+  const ly = R[1]*dx + R[4]*dy + R[7]*dz - (RESTL[HEAD*3+1] - REST_C[1]);
+  const lz = R[2]*dx + R[5]*dy + R[8]*dz - (RESTL[HEAD*3+2] - REST_C[2]);
+  return [clamp(Math.atan2(lx, lz), -0.8, 0.8), clamp(Math.atan2(ly, Math.hypot(lx, lz)) + 0.346, -0.6, 0.55)];
+}
+const toward = (v, t, rate, dt) => v + (t - v) * Math.min(1, rate * dt);
+function think(dt) {
+  const e = clamp(sim.energy * (mind.irritT > 0 ? 1.5 : 1), 0, 1);
+  mind.startleT = Math.max(0, mind.startleT - dt);
+  mind.irritT = Math.max(0, mind.irritT - dt);
+  mind.swipeCool = Math.max(0, mind.swipeCool - dt);
+  mind.huntCool = Math.max(0, mind.huntCool - dt);
+  const petting = pointer.petting && sim.time - pointer.lastPetT < 0.45;
+  const held = kit.grab >= 0;
+  const c = kit.c, homeDist = Math.hypot(c[0] - HOME[0] - REST_C[0], c[2] - HOME[2] - REST_C[2]);
+  mind.atHome = !mind.hunt && homeDist < 0.14 && Math.abs(kit.yaw) < 0.25;
+  if (!sim.ai) { mind.paws.forEach(p => { p.driven = false; }); return; }
+
+  // the hunt for yarn
+  if (!mind.hunt && !held && !petting && mind.huntCool <= 0 && mind.startleT <= 0) {
+    const b = balls.find(o => !o.held && !o.dying && o.x[1] < 0.3 && o.hunts < 1 && Math.hypot(o.v[0], o.v[2]) < 4
+      && Math.hypot(o.x[0] - c[0], o.x[2] - c[2]) < 1.9 && sim.time - (o.born || 0) > 0.4);
+    if (b) { mind.hunt = { b, state: 'notice', t: 0, total: 0, pounces: 0, batT: 0 }; b.hunts++; mind.action = null; mind.lay = 0; }
+  }
+  let lookTarget = null, lookRate = 6, lidT = 1, pupilT = 0.32, earBackT = mind.irritT > 0 ? 0.55 : 0, earRelaxT = 0, earFwdT = 0;
+  mind.slip = false; mind.home = !mind.hunt && !mind.ret; mind.yawTarget = mind.hunt || mind.ret ? mind.yawTarget : 0;
+  let typing = mind.atHome && !held && !petting && mind.startleT <= 0 && !mind.hunt;
+  mind.crouch = toward(mind.crouch, 0, 6, dt); mind.wiggle = toward(mind.wiggle, 0, 6, dt);
+
+  if (mind.hunt) {
+    const hs = mind.hunt, b = hs.b, dx = b.x[0] - c[0], dz = b.x[2] - c[2], dist = Math.hypot(dx, dz), yawTo = Math.atan2(dx, dz);
+    hs.t += dt; hs.total += dt;
+    lookTarget = _p.set(b.x[0], b.x[1], b.x[2]).clone(); lookRate = 12; pupilT = 0.95; earFwdT = 1;
+    mind.slip = hs.state !== 'bat';
+    const go = s => { hs.state = s; hs.t = 0; };
+    if (b.dying || held || petting) go('bored');
+    switch (hs.state) {
+      case 'notice': mind.yawTarget = kit.yaw; if (hs.t > 0.35) go('turn'); break;
+      case 'turn': mind.yawTarget = yawTo; if (Math.abs(wrap(yawTo - kit.yaw)) < 0.3 || hs.t > 1.1) go(dist > 0.6 ? 'crouch' : 'bat'); break;
+      case 'crouch':
+        mind.yawTarget = yawTo; mind.crouch = toward(mind.crouch, 1, 10, dt); mind.wiggle = toward(mind.wiggle, 1, 10, dt);
+        if (hs.t > (hs.pounces ? 0.3 : 0.55)) { leap(b.x[0] - dx / dist * 0.36, b.x[2] - dz / dist * 0.36); hs.pounces++; go('air'); }
+        break;
+      case 'air': mind.yawTarget = yawTo; if (kit.air === 0 && hs.t > 0.15) { mind.flight = false; go('bat'); } break;
+      case 'bat':
+        mind.yawTarget = yawTo;
+        hs.batT -= dt;
+        if (dist < 0.55 && hs.batT <= 0) {
+          const R = kit.R, side = (R[0]*dx + R[6]*dz) > 0 ? 1 : 0, p = mind.paws[side];
+          strike(p, b.x[0] - dx / dist * 0.02, b.x[2] - dz / dist * 0.02, { lift: 0.13, liftDur: 0.1, hold: 0.06, deep: 0.02 });
+          hs.batT = rand(0.3, 0.5);
+        }
+        if (dist > 0.65 && hs.t > 0.6) go(hs.pounces < 3 && hs.total < 9 ? 'turn' : 'bored');
+        if (hs.t > 3.2 || hs.total > 11) go('bored');
+        break;
+      case 'bored': mind.hunt = null; mind.ret = { state: 'turn', t: 0 }; mind.huntCool = 2.5; mind.flight = false; break;
+    }
+  } else if (mind.ret) {
+    const rs = mind.ret, hx = HOME[0] + REST_C[0], hz = HOME[2] + REST_C[2], dx = hx - c[0], dz = hz - c[2], dist = Math.hypot(dx, dz);
+    rs.t += dt; mind.slip = true;
+    const go = s => { rs.state = s; rs.t = 0; };
+    switch (rs.state) {
+      case 'turn': mind.yawTarget = dist > 0.35 ? Math.atan2(dx, dz) : 0; if (dist <= 0.35) go('settle'); else if (Math.abs(wrap(mind.yawTarget - kit.yaw)) < 0.35 || rs.t > 1) go('crouch'); break;
+      case 'crouch': mind.crouch = toward(mind.crouch, 1, 10, dt); if (rs.t > 0.25) { leap(hx, hz); go('air'); } break;
+      case 'air': if (kit.air === 0 && rs.t > 0.15) { mind.flight = false; go('turn'); } break;
+      case 'settle':
+        mind.yawTarget = 0; mind.home = true;
+        if ((dist < 0.06 && Math.abs(kit.yaw) < 0.12 && kit.R[4] > 0.97) || rs.t > 6) {
+          mind.ret = null;
+          mind.paws.forEach(p => { p.spot.copy(homeKeyPos(p.side)); p.phase = 'rest'; p.driven = true; p.wait = rand(0.3, 0.9); });
+        }
+        break;
+    }
+  }
+
+  // being held, petted, startled
+  if (held) { earBackT = 0.5; lookTarget = pointer.world.clone(); lookRate = 10; }
+  if (petting) {
+    lookTarget = pointer.world.clone(); lookRate = 4; lidT = 0.32; pupilT = 0.15; earRelaxT = 1;
+    mind.purr = toward(mind.purr, 1, 1.5, dt);
+  } else mind.purr = Math.max(0, mind.purr - 0.6 * dt);
+  mind.happy = toward(mind.happy, petting ? 1 : 0, petting ? 2 : 0.8, dt);
+  if (mind.purr > 0.4 && (mind.purrAcc += dt) > 0.6) { mind.purrAcc = 0; sim.purrs++; }
+  if (mind.startleT > 0) { earBackT = 1; pupilT = 1; lidT = 1.12; }
+  mind.puff = Math.max(0, mind.puff - 0.45 * dt);
+  mind.lash = toward(mind.lash, mind.irritT > 0 ? 1 : held ? 0.6 : (mind.hunt && mind.hunt.state === 'crouch') ? 0.35 : 0, 4, dt);
+
+  // laser: a cursor resting within reach becomes prey
+  const pg = pointer.ground;
+  const reach = pg && typing && !mind.action && pointer.inside && !pointer.down && sim.time - pointer.lastMove > 0.6 && pointer.armed
+    && Math.hypot(pg.x - c[0], pg.z - (c[2] + 0.5)) < 0.5;
+  mind.laser = reach ? mind.laser + dt : 0;
+  if (mind.laser > 0) { lookTarget = pg.clone(); lookRate = 14; pupilT = 0.9; mind.wiggle = toward(mind.wiggle, 0.5, 6, dt); }
+  if (mind.laser > 1.3 && mind.swipeCool <= 0) {
+    const p = mind.paws[pg.x > c[0] ? 1 : 0];
+    strike(p, pg.x, pg.z, { lift: 0.16, liftDur: 0.12, hold: 0.18, deep: 0.004 });
+    mind.swipeCool = 2.2; mind.laser = 0; pointer.armed = false;
+  }
+
+  // idle habits
+  if (typing) {
+    mind.idleT -= dt * (0.5 + e);
+    if (!mind.action && mind.idleT <= 0) {
+      const r = Math.random();
+      mind.action = r < 0.3 ? 'lick' : r < 0.52 ? 'yawn' : r < 0.74 ? 'lay' : 'cam';
+      mind.actionT = 0; mind.actionDur = { lick: 2.4, yawn: 2.0, lay: rand(3, 5), cam: 1.6 }[mind.action];
+      mind.idleT = rand(7, 15);
+    }
+  } else if (mind.action && mind.action !== 'cam') mind.action = null;
+  if (mind.action) {
+    mind.actionT += dt;
+    const a = mind.action, t = mind.actionT, u = t / mind.actionDur;
+    if (a === 'cam') { lookTarget = camPos; lookRate = 5; }
+    if (a === 'lick') {
+      const p = mind.paws[0], m = kit.x, R = kit.R, bob = Math.sin(t * 2 * Math.PI * 2.4) * 0.012;
+      p.phase = 'free'; p.driven = true;
+      p.goal.set(m[MUZZLE*3] - R[1]*0.05 + R[2]*0.06 + bob * R[1], m[MUZZLE*3+1] - R[4]*0.06 + R[5]*0.06 + bob, m[MUZZLE*3+2] - R[7]*0.05 + R[8]*0.06);
+      lidT = 0.45; mind.mouth = toward(mind.mouth, 0.35, 8, dt);
+      lookTarget = p.goal.clone(); lookRate = 6;
+    }
+    if (a === 'yawn') { lidT = 0.04; mind.mouth = toward(mind.mouth, Math.sin(Math.PI * clamp(u * 1.15, 0, 1)), 10, dt); earBackT = 0.3; }
+    if (a === 'lay') { mind.lay = toward(mind.lay, u < 0.85 ? 1 : 0, 3, dt); lidT = 0.05; earRelaxT = 0.6; }
+    if (t > mind.actionDur) {
+      if (a === 'lick') { const p = mind.paws[0]; p.phase = 'rest'; p.from.copy(p.goal); strike(p, p.spot.x, p.spot.z, { hold: 0.02 }); }
+      mind.action = null;
+    }
+  }
+  if (mind.action !== 'lay') mind.lay = toward(mind.lay, 0, 3, dt);
+  if (mind.action !== 'lick' && mind.action !== 'yawn') mind.mouth = toward(mind.mouth, 0, 8, dt);
+
+  // typing
+  const pausing = mind.action === 'lick' || mind.action === 'yawn' || mind.action === 'lay';
+  for (const p of mind.paws) {
+    if (kit.grab === p.i) continue;
+    if (p.phase === 'free') continue;
+    if (!mind.atHome && !mind.hunt && !mind.ret) p.driven = false;
+    if (mind.hunt || mind.ret) { if (p.phase === 'rest') p.driven = false; }
+    else if (mind.atHome) p.driven = true;
+    if (!p.driven) continue;
+    if (p.phase === 'rest' && typing && !pausing && mind.laser <= 0) {
+      p.t += dt;
+      const other = mind.paws[1 - p.side];
+      if (p.t > p.wait && other.phase !== 'lift' && other.phase !== 'strike') {
+        const [tx, tz, stomp] = typingTarget(p);
+        strike(p, tx, tz, { deep: stomp ? 0.004 : 0, hold: Math.random() < 0.08 * (0.5 + e) ? rand(0.6, 1.4) : undefined });
+        if (Math.random() < 0.05) { const [ox, oz] = typingTarget(other); strike(other, ox, oz); }   // both paws at once
+      }
+      if (p.phase === 'rest') {
+        // a resting paw only touches its key lightly: lift it until the key sits ~2 mm down, whatever the sag
+        const ki = keyAt(p.spot.x, p.spot.z);
+        if (ki >= 0) p.hover = clamp(p.hover + (keys[ki].d - 0.002) * 3 * dt, 0, 0.03);
+        pawGoal(p, 0); p.t = Math.min(p.t, 99); continue;
+      }
+    }
+    pawGoal(p, dt);
+  }
+
+  // where to look
+  if (!lookTarget) {
+    if (pointer.inside && sim.time - pointer.lastMove < 2.2 && pointer.world) { lookTarget = pointer.world.clone(); lookRate = 7; pupilT = 0.5; }
+    else if (typing) {
+      const a = mind.paws[0].goal, b = mind.paws[1].goal;
+      lookTarget = _p.set((a.x + b.x) / 2, KEY_TOP, (a.z + b.z) / 2 + 0.06).clone(); lookRate = 3;
+      mind.camT -= dt;
+      if (mind.camT < 0) { lookTarget = camPos; if (mind.camT < -1.1) mind.camT = rand(4, 10); }
+    } else lookTarget = _p.set(c[0] + Math.sin(kit.yaw), 0.3, c[2] + Math.cos(kit.yaw)).clone();
+  }
+  mind.look.lerp(lookTarget, Math.min(1, lookRate * dt));
+  const [ty, tp] = lookYawPitch(mind.look);
+  mind.yaw = toward(mind.yaw, ty, lookRate, dt);
+  mind.pitch = toward(mind.pitch, tp, lookRate, dt);
+  mind.roll = toward(mind.roll, mind.laser > 0 ? 0.22 : mind.action === 'yawn' ? Math.sin(mind.actionT * 7) * 0.12 * (mind.actionT > 1.4) : 0, 5, dt);
+
+  // eyes, ears
+  mind.blinkT -= dt;
+  if (mind.blinkT < 0) { mind.blink = 0.14; mind.blinkT = rand(2, 6); }
+  mind.blink = Math.max(0, mind.blink - dt);
+  mind.lid = toward(mind.lid, mind.blink > 0 ? 0.04 : lidT, 22, dt);
+  mind.pupil = toward(mind.pupil, pupilT, 5, dt);
+  mind.earBack = toward(mind.earBack, earBackT, mind.startleT > 0 ? 25 : 6, dt);
+  mind.earRelax = toward(mind.earRelax, earRelaxT, 4, dt);
+  mind.earFwd = toward(mind.earFwd, earFwdT, 6, dt);
+  mind.twitchT -= dt;
+  if (mind.twitchT < 0) { mind.twitch[Math.random() < 0.5 ? 0 : 1] = 1; mind.twitchT = rand(3, 9); }
+  mind.twitch[0] = Math.max(0, mind.twitch[0] - dt * 6); mind.twitch[1] = Math.max(0, mind.twitch[1] - dt * 6);
+}
+
+/* ---------- pose: the rest shape the soft body is pulled toward ---------- */
+const POSE = new Float64Array(NP*3);
+function rotHead(v, out) {
+  const cy = Math.cos(mind.yaw), sy = Math.sin(mind.yaw), cp = Math.cos(mind.pitch), sp = Math.sin(mind.pitch), cr = Math.cos(mind.roll), sr = Math.sin(mind.roll);
+  const x1 = v[0]*cr - v[1]*sr, y1 = v[0]*sr + v[1]*cr, z1 = v[2];
+  const y2 = y1*cp + z1*sp, z2 = -y1*sp + z1*cp;
+  out[0] = x1*cy + z2*sy; out[1] = y2; out[2] = -x1*sy + z2*cy;
+}
+const _v = [0, 0, 0], _o = [0, 0, 0];
+function buildPose() {
+  POSE.set(RESTL);
+  const t = sim.time, add = (i, x, y, z) => { POSE[i*3] += x; POSE[i*3+1] += y; POSE[i*3+2] += z; };
+  if (!sim.ai) return;
+  const br = Math.sin(t * 2 * Math.PI * 0.32) * 0.004;
+  add(CHEST, 0, br, br * 0.6); add(BELLY, 0, br * 0.5, br);
+  const cr = mind.crouch, wg = Math.sin(t * 2 * Math.PI * 7) * 0.022 * mind.wiggle;
+  add(HIP, wg, -0.03 * cr, 0); add(THIGH_L, wg, -0.02 * cr, 0); add(THIGH_R, wg, -0.02 * cr, 0);
+  add(BELLY, 0, -0.05 * cr, 0); add(CHEST, 0, -0.07 * cr, 0.02 * cr);
+  const L = mind.lay;
+  add(CHEST, 0, -0.14 * L, 0.09 * L); add(BELLY, 0, -0.06 * L, 0.04 * L);
+  // head group: ears first (in head space), then the head turns about the neck
+  for (const i of HEAD_GROUP) {
+    _v[0] = POSE[i*3] - NECK[0]; _v[1] = POSE[i*3+1] - NECK[1]; _v[2] = POSE[i*3+2] - NECK[2];
+    if (i === EAR_L || i === EAR_R) {
+      const sx = i === EAR_L ? -1 : 1, b = mind.earBack, r = mind.earRelax, f = mind.earFwd, tw = mind.twitch[i === EAR_L ? 0 : 1];
+      _v[0] += sx * (0.035 * b + 0.03 * r + 0.012 * tw); _v[1] += -0.05 * b - 0.02 * r - 0.01 * tw; _v[2] += -0.075 * b + 0.03 * f - 0.025 * tw;
+    }
+    rotHead(_v, _o);
+    POSE[i*3] = _o[0] + NECK[0];
+    POSE[i*3+1] = _o[1] + NECK[1] - 0.06 * cr - 0.40 * L;
+    POSE[i*3+2] = _o[2] + NECK[2] + 0.2 * L;
+  }
+  // tail: calm curl with a lazy sway, raised when happy, lashing when cross
+  for (let j = 0; j < 5; j++) {
+    const i = T0 + j, h = mind.happy, l = mind.lash;
+    for (let a = 0; a < 3; a++) POSE[i*3+a] += (RAISED_TAIL[j*3+a] - RESTL[i*3+a]) * h;
+    POSE[i*3] += Math.sin(t * 1.3 + j * 0.5) * 0.015 * j * (1 - l) + Math.sin(t * 9 + j * 0.8) * 0.12 * (j + 1) / 5 * l;
+  }
+  if (mind.flight) { add(PAW_L, 0, 0.06, 0.1); add(PAW_R, 0, 0.06, 0.1); add(FOOT_L, 0, 0.02, -0.08); add(FOOT_R, 0, 0.02, -0.08); }
+}
+function placeDrivenPaws() {
+  // a driven paw is posed so its goal lands on a world target (a key, the yarn, the muzzle)
+  let M = 0, cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < NP; i++) { const w = kit.wc[i]; M += w; cx += w*POSE[i*3]; cy += w*POSE[i*3+1]; cz += w*POSE[i*3+2]; }
+  cx /= M; cy /= M; cz /= M;
+  const R = kit.R, c = kit.c;
+  for (const p of mind.paws) {
+    if (!p.driven || kit.grab === p.i) continue;
+    const dx = p.goal.x - c[0], dy = p.goal.y - c[1], dz = p.goal.z - c[2], i = p.i;
+    POSE[i*3]   = cx + R[0]*dx + R[3]*dy + R[6]*dz;
+    POSE[i*3+1] = cy + R[1]*dx + R[4]*dy + R[7]*dz;
+    POSE[i*3+2] = cz + R[2]*dx + R[5]*dy + R[8]*dz;
+  }
+}
+
+/* =====================================================================
+   Physics step
+   ===================================================================== */
+function step(h, target, ballTarget) {
+  const x = kit.x, p = kit.p, v = kit.v;
+  let vy = 0;
+  for (let k = 0; k < NP*3; k += 3) {
+    v[k+1] -= GRAV * h; vy += v[k+1];
+    p[k] = x[k]; p[k+1] = x[k+1]; p[k+2] = x[k+2];
+    x[k] += v[k]*h; x[k+1] += v[k+1]*h; x[k+2] += v[k+2]*h;
+  }
+  kit.vyc = vy / NP;
+  for (const b of balls) ballStep(b, h, b.held ? ballTarget : null);
+  if (kit.grab >= 0 && target) {
+    const k = kit.grab*3, minY = (overKb(target.x, target.z) ? KEY_TOP - TRAVEL : 0) + RAD[kit.grab] * 0.9;
+    let tx = target.x - kit.goal[0], ty = Math.max(target.y, minY) - kit.goal[1], tz = target.z - kit.goal[2];
+    const d = Math.hypot(tx, ty, tz), s = d > REACH ? REACH / d : 1;     // a firm leg: the paw only goes as far as it reaches
+    x[k] = kit.goal[0] + tx * s; x[k+1] = Math.max(kit.goal[1] + ty * s, minY); x[k+2] = kit.goal[2] + tz * s;
+  }
+  shapeMatch(kit, sim.alpha);
+  for (const b of balls) ballCollide(b, h);
+  const contacts = boundaries(kit);
+  if (contacts) { if (kit.air > 0.12 && kit.vyc < -1.5) mind.landed = sim.time; kit.air = 0; } else kit.air += h;
+  updateKeys(h);
+  const ih = 1 / h, drag = 1 - 0.12 * h;
+  for (let k = 0; k < NP*3; k++) v[k] = (x[k] - p[k]) * ih * drag;
+  if (kit.settle > 0) kit.settle -= h;
+  dampRelative(kit, sim.damp, contacts && kit.grab < 0 ? 0.006 : 0, kit.grab >= 0 ? HOLD_DAMP : kit.settle > 0 ? SETTLE_DAMP : 0);
+  steer();
+}
+
+/* =====================================================================
+   Implicit surface (marching cubes in the kitten's own frame)
+   ===================================================================== */
+const S3 = new Float64Array(9);
+function updateVisual() {
+  fit(kit);
+  const b = kit, R = b.R, A = b.An, M = b.M, c = b.c, x = b.x;
+  for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) S3[r*3+q] = R[r]*A[q] + R[3+r]*A[3+q] + R[6+r]*A[6+q];
+  for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) {
+    let s = 0.5 * (S3[r*3+q] + S3[q*3+r]);
+    s = (r === q ? 1 : 0) + GAMMA * (s - (r === q ? 1 : 0));
+    M[r*3+q] = r === q ? clamp(s, 0.7, 1.3) : clamp(s, -0.2, 0.2);
+  }
+  if (inv3(M, b.Minv) < 0.3) { M.set([1,0,0, 0,1,0, 0,0,1]); b.Minv.set(M); }
+  const Mi = b.Minv;
+  b.sk = 1 / Math.max(Math.abs(Mi[0])+Math.abs(Mi[1])+Math.abs(Mi[2]), Math.abs(Mi[3])+Math.abs(Mi[4])+Math.abs(Mi[5]), Math.abs(Mi[6])+Math.abs(Mi[7])+Math.abs(Mi[8]));
+  const nx = M[0]*R[3] + M[1]*R[4] + M[2]*R[5], ny = M[3]*R[3] + M[4]*R[4] + M[5]*R[5], nz = M[6]*R[3] + M[7]*R[4] + M[8]*R[5];
+  b.groundK = clamp(Math.hypot(nx, ny, nz), 0.7, 1.3);
+  // the mesh lives in a frame anchored on the heavy torso: a paw or the head moving doesn't drag the voxel
+  // grid across the body (which would make the whole surface shimmer)
+  const pl = b.pl, o = b.meshO;
+  o[0] = o[1] = o[2] = 0;
+  for (const i of TORSO) for (let a = 0; a < 3; a++) o[a] += x[i*3+a] / TORSO.length;
+  for (let i = 0; i < NP; i++) {
+    const k = i*3, dx = x[k]-o[0], dy = x[k+1]-o[1], dz = x[k+2]-o[2];
+    pl[k] = R[0]*dx + R[3]*dy + R[6]*dz; pl[k+1] = R[1]*dx + R[4]*dy + R[7]*dz; pl[k+2] = R[2]*dx + R[5]*dy + R[8]*dz;
+  }
+  let mx = 1;
+  STRANDS.forEach(([, , bb, r1, r2], s) => {
+    const a = strandEnd(pl, s), ratio = Math.hypot(pl[bb*3]-a[0], pl[bb*3+1]-a[1], pl[bb*3+2]-a[2]) / STRAND_L0[s];
+    b.strandR[s*2] = r1; b.strandR[s*2+1] = r2;
+    if (s === 3 || s === 4) mx = Math.max(mx, ratio);
+  });
+  b.stretch = mx;
+  kitGroup.position.set(o[0], o[1], o[2]);
+  kitGroup.quaternion.set(b.qr[0], b.qr[1], b.qr[2], b.qr[3]);
+}
+function roundCone(px, py, pz, bax, bay, baz, l2, rr, a2, il2, r1, r2) {
+  const y = px*bax + py*bay + pz*baz, z = y - l2;
+  const qx = px*l2 - bax*y, qy = py*l2 - bay*y, qz = pz*l2 - baz*y;
+  const x2 = qx*qx + qy*qy + qz*qz, y2 = y*y*l2, z2 = z*z*l2, k = Math.sign(rr)*rr*rr*x2;
+  if (Math.sign(z)*a2*z2 > k) return Math.sqrt(x2 + z2)*il2 - r2;
+  if (Math.sign(y)*a2*y2 < k) return Math.sqrt(x2 + y2)*il2 - r1;
+  return (Math.sqrt(x2*a2*il2) + y*rr)*il2 - r1;
+}
+function buildMesh() {
+  const mc = furMC, N = RES, N2 = N * N, field = mc.field, b = kit, pl = b.pl, M = b.M, Mi = b.Minv, sk = b.sk, puff = 1 + 0.06 * mind.puff;
+  const rnx = Math.hypot(M[0], M[1], M[2]), rny = Math.hypot(M[3], M[4], M[5]), rnz = Math.hypot(M[6], M[7], M[8]);
+  let lx = Infinity, ly = Infinity, lz = Infinity, hx = -Infinity, hy = -Infinity, hz = -Infinity;
+  for (let i = 0; i < T0; i++) {
+    const k = i*3, r = RAD[i] * puff + 0.08;
+    lx = Math.min(lx, pl[k] - r*rnx); hx = Math.max(hx, pl[k] + r*rnx);
+    ly = Math.min(ly, pl[k+1] - r*rny); hy = Math.max(hy, pl[k+1] + r*rny);
+    lz = Math.min(lz, pl[k+2] - r*rnz); hz = Math.max(hz, pl[k+2] + r*rnz);
+  }
+  // the box only changes when the body really outgrows it (or leaves a lot of slack), never frame to frame
+  const need = [lx, ly, lz, hx, hy, hz], box = b.meshBox, QB = 0.08;
+  let keep = box.length === 6;
+  for (let a = 0; a < 3 && keep; a++)
+    keep = need[a] >= box[a] && need[a+3] <= box[a+3] && need[a] - box[a] < 4 * QB && box[a+3] - need[a+3] < 4 * QB;
+  if (!keep) for (let a = 0; a < 3; a++) { box[a] = (Math.floor(need[a] / QB) - 2) * QB; box[a+3] = (Math.ceil(need[a+3] / QB) + 2) * QB; }
+  [lx, ly, lz, hx, hy, hz] = box;
+  const vx = (hx - lx) / N, vy = (hy - ly) / N, vz = (hz - lz) / N;
+  field.fill(-1);
+  mc.normal_cache.fill(0);
+  const range = (lo, hi, l, v) => [Math.max(1, Math.floor((lo - l) / v)), Math.min(N - 2, Math.ceil((hi - l) / v))];
+  for (const [i, kb] of SPHERES) {
+    const k = i*3, r = RAD[i] * puff, cx = pl[k], cy = pl[k+1], cz = pl[k+2];
+    const ex = r*rnx + kb + 1.5*vx, ey = r*rny + kb + 1.5*vy, ez = r*rnz + kb + 1.5*vz;
+    const [x0, x1] = range(cx - ex, cx + ex, lx, vx), [y0, y1] = range(cy - ey, cy + ey, ly, vy), [z0, z1] = range(cz - ez, cz + ez, lz, vz);
+    for (let iz = z0; iz <= z1; iz++) {
+      const pz = lz + iz*vz - cz;
+      for (let iy = y0; iy <= y1; iy++) {
+        const py = ly + iy*vy - cy, ax = Mi[1]*py + Mi[2]*pz, ay = Mi[4]*py + Mi[5]*pz, az = Mi[7]*py + Mi[8]*pz;
+        let idx = iz*N2 + iy*N + x0;
+        for (let ix = x0; ix <= x1; ix++, idx++) {
+          const px = lx + ix*vx - cx, qx = Mi[0]*px + ax, qy = Mi[3]*px + ay, qz = Mi[6]*px + az;
+          const d = (Math.sqrt(qx*qx + qy*qy + qz*qz) - r) * sk, cur = -field[idx], diff = d - cur;
+          if (diff >= kb) continue;
+          let hh = 0.5 - 0.5 * diff / kb; if (hh > 1) hh = 1;
+          field[idx] = -(cur + (d - cur)*hh - kb*hh*(1 - hh));
+        }
+      }
+    }
+  }
+  // head forward, for flattening the ears into triangles
+  let fx = pl[MUZZLE*3] - pl[HEAD*3], fy = pl[MUZZLE*3+1] - pl[HEAD*3+1], fz = pl[MUZZLE*3+2] - pl[HEAD*3+2];
+  STRANDS.forEach(([, , bb, , , kb, flat], s) => {
+    const r1 = b.strandR[s*2] * puff, r2 = b.strandR[s*2+1] * puff, a = strandEnd(pl, s);
+    const ax = a[0], ay = a[1], az = a[2], bax = pl[bb*3] - ax, bay = pl[bb*3+1] - ay, baz = pl[bb*3+2] - az;
+    const l2 = bax*bax + bay*bay + baz*baz, rr = r1 - r2, a2 = l2 - rr*rr, il2 = 1 / l2, e = Math.max(r1, r2) + kb;
+    let nx = 0, ny = 0, nz = 0;
+    if (flat) {
+      const il = 1 / Math.sqrt(l2), t = (fx*bax + fy*bay + fz*baz) * il * il;
+      nx = fx - bax*t; ny = fy - bay*t; nz = fz - baz*t;
+      const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+    }
+    const [x0, x1] = range(Math.min(ax, ax+bax) - e - 1.5*vx, Math.max(ax, ax+bax) + e + 1.5*vx, lx, vx);
+    const [y0, y1] = range(Math.min(ay, ay+bay) - e - 1.5*vy, Math.max(ay, ay+bay) + e + 1.5*vy, ly, vy);
+    const [z0, z1] = range(Math.min(az, az+baz) - e - 1.5*vz, Math.max(az, az+baz) + e + 1.5*vz, lz, vz);
+    for (let iz = z0; iz <= z1; iz++) {
+      const pz0 = lz + iz*vz - az;
+      for (let iy = y0; iy <= y1; iy++) {
+        const py0 = ly + iy*vy - ay;
+        let idx = iz*N2 + iy*N + x0;
+        for (let ix = x0; ix <= x1; ix++, idx++) {
+          let px = lx + ix*vx - ax, py = py0, pz = pz0;
+          if (flat) { const t = (px*nx + py*ny + pz*nz) * 1.4; px += nx*t; py += ny*t; pz += nz*t; }
+          const d = a2 > 1e-6 ? roundCone(px, py, pz, bax, bay, baz, l2, rr, a2, il2, r1, r2) : Math.hypot(px, py, pz) - r1;
+          const cur = -field[idx], diff = d - cur;
+          if (diff >= kb) continue;
+          let hh = 0.5 - 0.5 * diff / kb; if (hh > 1) hh = 1;
+          field[idx] = -(cur + (d - cur)*hh - kb*hh*(1 - hh));
+        }
+      }
+    }
+  });
+  mc.update();
+  const n = Math.min(mc.count, MAX_POLY * 3) * 3, attrs = mc.geometry.attributes;
+  for (const at of [attrs.position, attrs.normal]) { at.clearUpdateRanges(); at.addUpdateRange(0, n); }
+  mc.position.set((lx + hx) / 2, (ly + hy) / 2, (lz + hz) / 2);
+  mc.scale.set((hx - lx) / 2, (hy - ly) / 2, (hz - lz) / 2);
+}
+
+/* =====================================================================
+   Face, whiskers, ears, pads, tail
+   ===================================================================== */
+const sphereGeo = new THREE.SphereGeometry(1, 32, 24);
+const EYE_R = 0.037;
+const eyes = [-1, 1].map(() => {
+  const g = new THREE.Group(), iris = new THREE.Mesh(sphereGeo, irisMat), cornea = new THREE.Mesh(sphereGeo, corneaMat);
+  iris.scale.setScalar(EYE_R);
+  cornea.scale.setScalar(EYE_R * 1.05); cornea.position.z = EYE_R * 0.06;
+  g.add(iris, cornea);
+  scene.add(g);
+  return g;
+});
+const nose = new THREE.Mesh(sphereGeo, pinkMat), mouth = new THREE.Mesh(sphereGeo, mouthMat);
+scene.add(nose, mouth);
+const earShape = new THREE.Shape();
+earShape.moveTo(-0.5, -0.5); earShape.quadraticCurveTo(0, -0.62, 0.5, -0.5); earShape.quadraticCurveTo(0.2, 0.1, 0.03, 0.5);
+earShape.quadraticCurveTo(0, 0.55, -0.03, 0.5); earShape.quadraticCurveTo(-0.2, 0.1, -0.5, -0.5);
+const earInner = [0, 1].map(() => { const m = new THREE.Mesh(new THREE.ShapeGeometry(earShape, 8), pinkMat); m.material = pinkMat.clone(); m.material.side = THREE.DoubleSide; scene.add(m); return m; });
+const pads = new THREE.InstancedMesh(sphereGeo, pinkMat, 10);
+pads.frustumCulled = false;
+scene.add(pads);
+const whiskerMat = new THREE.LineBasicMaterial({ color: 0xebe7e1, transparent: true, opacity: 0.9 });
+const WHISK = [];
+for (const side of [-1, 1]) for (const tilt of [0.14, 0, -0.14]) {
+  const pts = Array.from({ length: 7 }, () => new THREE.Vector3()), geo = new THREE.BufferGeometry().setFromPoints(pts);
+  const line = new THREE.Line(geo, whiskerMat);
+  line.frustumCulled = false;
+  scene.add(line);
+  WHISK.push({ side, tilt, pts, prev: pts.map(v => v.clone()), line, init: false });
+}
+const tailMesh = new THREE.Mesh(makeTubeGeo(40, 12), furMat);
+tailMesh.castShadow = tailMesh.receiveShadow = true;
+tailMesh.frustumCulled = false;
+scene.add(tailMesh);
+const tailPts = Array.from({ length: 6 }, () => new THREE.Vector3());
+
+const hf = { up: new THREE.Vector3(), fwd: new THREE.Vector3(), right: new THREE.Vector3(), head: new THREE.Vector3(), muz: new THREE.Vector3() };
+function headFrame(P, out) {
+  const x = P;
+  out.head.set(x[HEAD*3], x[HEAD*3+1], x[HEAD*3+2]);
+  out.muz.set(x[MUZZLE*3], x[MUZZLE*3+1], x[MUZZLE*3+2]);
+  out.up.set((x[EAR_L*3] + x[EAR_R*3]) / 2, (x[EAR_L*3+1] + x[EAR_R*3+1]) / 2, (x[EAR_L*3+2] + x[EAR_R*3+2]) / 2).sub(out.head).normalize();
+  out.fwd.copy(out.muz).sub(out.head);
+  out.fwd.addScaledVector(out.up, -out.fwd.dot(out.up)).normalize();
+  out.right.crossVectors(out.up, out.fwd);
+  return out;
+}
+// eye positions measured once in the rest pose, then carried in the head frame
+const EYE_OFF = (() => {
+  const f = headFrame(RESTL, { up: new THREE.Vector3(), fwd: new THREE.Vector3(), right: new THREE.Vector3(), head: new THREE.Vector3(), muz: new THREE.Vector3() });
+  return [-1, 1].map(s => { const d = new THREE.Vector3(s * 0.056, 0.024, 0.114);
+    return [d.dot(f.right), d.dot(f.up), d.dot(f.fwd)]; });
+})();
+const atHead = (o, base, a, b, c) => o.copy(base).addScaledVector(hf.right, a).addScaledVector(hf.up, b).addScaledVector(hf.fwd, c);
+const _e = new THREE.Vector3(), _d = new THREE.Vector3(), _n = new THREE.Vector3(), _ax = new THREE.Vector3(), _xb = new THREE.Vector3();
+function placeFace(dt) {
+  headFrame(kit.x, hf);
+  // eyes: look at the target, but never roll back into the head
+  eyes.forEach((g, s) => {
+    atHead(g.position, hf.head, ...EYE_OFF[s]);
+    // the head does the looking; the eyeballs only hint at it, so the iris always fills the eye
+    _d.copy(mind.look).sub(g.position).normalize().lerp(hf.fwd, 0.75).normalize();
+    g.lookAt(_e.copy(g.position).add(_d));
+    g.scale.set(1, clamp(mind.lid, 0.04, 1.15), 1);
+  });
+  irisUniforms.uPupil.value = mind.pupil;
+  atHead(nose.position, hf.muz, 0, 0.03, 0.046);
+  nose.scale.set(0.017, 0.011, 0.012);
+  nose.lookAt(_e.copy(nose.position).add(hf.fwd));
+  atHead(mouth.position, hf.muz, 0, -0.022, 0.047);
+  mouth.scale.set(0.02, 0.003 + 0.02 * mind.mouth, 0.01 + 0.01 * mind.mouth);
+  mouth.lookAt(_e.copy(mouth.position).add(hf.fwd));
+  mouth.visible = mind.mouth > 0.02;
+  // pink inner ears, on the front face of each flattened ear
+  [EAR_L, EAR_R].forEach((ei, s) => {
+    const m = earInner[s];
+    _ax.set(kit.x[ei*3], kit.x[ei*3+1], kit.x[ei*3+2]).sub(hf.head);
+    const len = _ax.length(); _ax.normalize();
+    _n.copy(hf.fwd).addScaledVector(_ax, -hf.fwd.dot(_ax)).normalize();
+    _xb.crossVectors(_ax, _n);
+    m.position.copy(hf.head).addScaledVector(_ax, len * 0.74).addScaledVector(_n, 0.015);
+    m.quaternion.setFromRotationMatrix(_m4.makeBasis(_xb, _ax, _n));
+    m.scale.set(0.036, 0.05, 1);
+  });
+  // toe beans under the front paws
+  const R = kit.R;
+  [PAW_L, PAW_R].forEach((pi, s) => {
+    const px = kit.x[pi*3], py = kit.x[pi*3+1], pz = kit.x[pi*3+2], r = RAD[pi];
+    [[0, 0, 0.018, 0.015], [-0.022, 0.02, 0.009, 0.008], [-0.008, 0.032, 0.009, 0.008], [0.008, 0.032, 0.009, 0.008], [0.022, 0.02, 0.009, 0.008]].forEach(([ox, oz, sx, sz], j) => {
+      _p.set(px - R[1]*r*0.86 + R[0]*ox + R[2]*oz, py - R[4]*r*0.86 + R[3]*ox + R[5]*oz, pz - R[7]*r*0.86 + R[6]*ox + R[8]*oz);
+      pads.setMatrixAt(s*5 + j, _m4.compose(_p, kitGroup.quaternion, _s.set(sx, 0.006, sz)));
+    });
+  });
+  pads.instanceMatrix.needsUpdate = true;
+  // whiskers: springy strands that lag behind the head
+  for (const w of WHISK) {
+    atHead(_e, hf.muz, w.side * 0.034, -0.006 - w.tilt * 0.06, 0.028);
+    _d.copy(hf.right).multiplyScalar(w.side).addScaledVector(hf.up, w.tilt).addScaledVector(hf.fwd, 0.28).normalize();
+    for (let j = 0; j < 7; j++) {
+      const f = j / 6, rest = _p.copy(_e).addScaledVector(_d, 0.17 * f).addScaledVector(hf.up, -0.018 * f * f);
+      const pt = w.pts[j], pv = w.prev[j];
+      if (!w.init || j === 0) { pt.copy(rest); pv.copy(rest); continue; }
+      const vx = (pt.x - pv.x) * 0.45, vy = (pt.y - pv.y) * 0.45, vz = (pt.z - pv.z) * 0.45;
+      pv.copy(pt);
+      pt.x += vx; pt.y += vy; pt.z += vz;
+      const k = 0.8 - 0.3 * f;
+      pt.lerp(rest, k);
+    }
+    w.init = true;
+    w.line.geometry.setFromPoints(w.pts);
+  }
+  // tail: a furry tube through the tail chain, rooted inside the hips
+  const x = kit.x;
+  tailPts[0].set(x[HIP*3] + (x[T0*3] - x[HIP*3]) * 0.45, x[HIP*3+1] + (x[T0*3+1] - x[HIP*3+1]) * 0.45, x[HIP*3+2] + (x[T0*3+2] - x[HIP*3+2]) * 0.45);
+  for (let j = 0; j < 5; j++) tailPts[j+1].set(x[(T0+j)*3], x[(T0+j)*3+1], x[(T0+j)*3+2]);
+  const pf = 1 + 0.85 * mind.puff;
+  updateTube(tailMesh.geometry, tailPts, t => (0.036 + (0.016 - 0.036) * t) * pf * Math.sqrt(Math.max(0, 1 - t ** 8)));
+  // contact shadow
+  let mx = 0, mz = 0, n = 0;
+  for (let i = 0; i < T0; i++) { mx += x[i*3]; mz += x[i*3+2]; n++; }
+  kitBlob.position.set(mx / n + 0.02, 0.002, mz / n - 0.02);
+  const hgt = Math.max(0, Math.min(...[HIP, FOOT_L, FOOT_R].map(i => x[i*3+1] - RAD[i])));
+  kitBlob.scale.set(0.75 * (1 + hgt), 1, 0.8 * (1 + hgt));
+  kitBlob.rotation.y = -kit.yaw;
+  kitBlob.material.uniforms.opacity.value = 0.85 * Math.exp(-hgt * 1.6);
+}
+
+/* =====================================================================
+   Layout: camera framing + invisible walls around the visible free area
+   ===================================================================== */
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
+let viewW = 1, viewH = 1;
+function rayDir(px, py) {
+  ndc.set(px / viewW * 2 - 1, -(py / viewH) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  return raycaster.ray.direction.clone();
+}
+function layout() {
+  const W = innerWidth, Hh = innerHeight;
+  viewW = W; viewH = Hh;
+  renderer.setSize(W, Hh, false);
+  const free = { l: 0, r: W, b: Hh };
+  camera.aspect = W / Hh;
+  const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const dist = Math.max(2 * 1.05 / (2 * tanV * camera.aspect), 1.5 / (2 * tanV), 3);   // keyboard and kitten always fit
+  const el = THREE.MathUtils.degToRad(26);
+  camera.position.set(0, 0.26 + Math.sin(el) * dist, -0.18 + Math.cos(el) * dist);
+  camera.lookAt(0, 0.26, -0.18);
+  const cx = W / 2, cy = Hh * 0.56;
+  camera.setViewOffset(W, Hh, W / 2 - cx, Hh / 2 - cy, W, Hh);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
+  camPos.copy(camera.position);
+  const o = camera.position, inside = rayDir(cx, cy);
+  const plane = (d1, d2) => {
+    const n = d1.cross(d2).normalize();
+    if (n.dot(inside) < 0) n.negate();
+    return { nx: n.x, ny: n.y, nz: n.z, d: -n.dot(o) };
+  };
+  planes = [
+    plane(rayDir(free.l + 18, 0), rayDir(free.l + 18, Hh)),
+    plane(rayDir(free.r - 10, 0), rayDir(free.r - 10, Hh)),
+    plane(rayDir(0, free.b - 14), rayDir(W, free.b - 14)),
+    { nx: 0, ny: 0, nz: 1, d: 1.6 },
+  ];
+}
+
+/* =====================================================================
+   Interaction
+   ===================================================================== */
+const cursorEl = document.getElementById('cursor');
+const pointer = { x: 0, y: 0, inside: false, down: false, lastMove: -9, armed: true, ground: null, world: new THREE.Vector3(0, 0.1, 0.2),
+  mode: null, t0: 0, travel: 0, petting: false, lastPetT: -9, id: -1 };
+let grab = null;
+function setCursor(state) { for (const c of ['hover', 'grab', 'laser']) cursorEl.classList.toggle(c, state === c); }
+function pick(px, py) {
+  const d = rayDir(px, py), o = raycaster.ray.origin;
+  let best = null, bt = Infinity;
+  const test = (cx, cy, cz, r, hit) => {
+    const ox = cx - o.x, oy = cy - o.y, oz = cz - o.z, tca = ox*d.x + oy*d.y + oz*d.z, d2 = ox*ox + oy*oy + oz*oz - tca*tca;
+    if (d2 > r*r) return;
+    const t = tca - Math.sqrt(r*r - d2);
+    if (t > 0 && t < bt) { bt = t; best = hit; }
+  };
+  for (let i = 0; i < NP; i++) test(kit.x[i*3], kit.x[i*3+1], kit.x[i*3+2], Math.max(RAD[i] * 1.2, 0.05), { kind: 'kit', i });
+  for (const b of balls) if (!b.dying) test(b.x[0], b.x[1], b.x[2], YARN_R * 1.1, { kind: 'ball', b });
+  if (best) best.point = o.clone().addScaledVector(d, bt);
+  return best;
+}
+function groundPoint(px, py) {
+  const d = rayDir(px, py), o = raycaster.ray.origin;
+  if (d.y >= -1e-4) return null;
+  let t = (KEY_TOP - o.y) / d.y, q = o.clone().addScaledVector(d, t);
+  if (!overKb(q.x, q.z)) { t = -o.y / d.y; q = o.clone().addScaledVector(d, t); }
+  return q;
+}
+function dragTarget(px, py) {
+  const p = new THREE.Vector3();
+  rayDir(px, py);
+  if (!raycaster.ray.intersectPlane(grab.plane, p)) return null;
+  return p.add(grab.off);
+}
+canvas.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const hit = pick(e.clientX, e.clientY);
+  pointer.down = true; pointer.id = e.pointerId; pointer.t0 = performance.now(); pointer.travel = 0; pointer.x = e.clientX; pointer.y = e.clientY;
+  if (!hit) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch {}
+  const n = camera.getWorldDirection(new THREE.Vector3()).setY(0).normalize().negate();
+  if (hit.kind === 'ball') {
+    const b = hit.b, c = new THREE.Vector3(b.x[0], b.x[1], b.x[2]);
+    grab = { kind: 'ball', b, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(n, hit.point), off: c.clone().sub(hit.point), target: c.clone(), cur: c.clone(), hist: [] };
+    b.held = true;
+    setCursor('grab');
+  } else if (hit.i === PAW_L || hit.i === PAW_R) {
+    const k = hit.i * 3, c = new THREE.Vector3(kit.x[k], kit.x[k+1], kit.x[k+2]);
+    grab = { kind: 'paw', i: hit.i, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(n, hit.point), off: c.clone().sub(hit.point), target: c.clone(), cur: c.clone(), hist: [] };
+    setGrabPaw(hit.i);
+    setCursor('grab');
+  } else {
+    pointer.mode = 'touch';
+    pointer.world.copy(hit.point);
+  }
+});
+function setGrabPaw(i) {
+  kit.grab = i;
+  if (i < 0) { kit.wc = kit.wa = FITW; kit.settle = SETTLE_TIME; return; }
+  // a held paw leaves the centroid and only leans the body toward it; its leg does the stretching
+  const wc = FITW.slice(), wa = FITW.slice();
+  kit.wLean = wa[i] = MASS[i] * 0.8; wc[i] = 0;
+  kit.goal[0] = kit.x[i*3]; kit.goal[1] = kit.x[i*3+1]; kit.goal[2] = kit.x[i*3+2];
+  kit.wc = wc; kit.wa = wa;
+  const p = mind.paws.find(q => q.i === i);
+  p.phase = 'rest'; p.driven = false;
+}
+canvas.addEventListener('pointermove', e => {
+  const dx = e.clientX - pointer.x, dy = e.clientY - pointer.y;
+  pointer.x = e.clientX; pointer.y = e.clientY; pointer.inside = true;
+  cursorEl.style.transform = `translate3d(${e.clientX}px, ${e.clientY}px, 0)`;
+  cursorEl.classList.add('on');
+  const moved = Math.hypot(dx, dy);
+  if (moved > 1.5) { pointer.lastMove = sim.time; pointer.armed = true; }
+  pointer.ground = groundPoint(e.clientX, e.clientY);
+  if (grab) {
+    if (e.pointerId !== pointer.id) return;
+    pointer.travel += moved;
+    const t = dragTarget(e.clientX, e.clientY);
+    if (!t) return;
+    grab.target.copy(t);
+    pointer.world.copy(t);
+    const now = performance.now();
+    grab.hist.push({ t: now, p: t.clone() });
+    while (grab.hist.length > 2 && now - grab.hist[0].t > 100) grab.hist.shift();
+    return;
+  }
+  const hit = pick(e.clientX, e.clientY);
+  if (pointer.mode === 'touch') {
+    pointer.travel += moved;
+    if (pointer.travel > 12 && moved > 0.5) { pointer.petting = true; pointer.lastPetT = sim.time; }
+    if (hit && hit.kind === 'kit') pointer.world.copy(hit.point);
+  } else {
+    if (hit) pointer.world.copy(hit.point); else if (pointer.ground) pointer.world.copy(pointer.ground).setY(Math.max(pointer.ground.y, 0.12));
+    if (e.pointerType === 'mouse' && mind.laser <= 0) setCursor(hit ? 'hover' : '');
+  }
+});
+function endPointer(e) {
+  if (e && e.pointerId !== pointer.id) return;
+  const quick = performance.now() - pointer.t0 < 260 && pointer.travel < 8;
+  if (grab) {
+    if (grab.kind === 'ball') {
+      const b = grab.b, h = grab.hist, now = performance.now();
+      b.held = false; b.v.fill(0);
+      if (h.length > 1 && now - h[h.length - 1].t < 60) {
+        const a = h[0], z = h[h.length - 1], dt = (z.t - a.t) / 1000;
+        if (dt > 0.008) for (const [ax, i] of [['x', 0], ['y', 1], ['z', 2]]) b.v[i] = clamp((z.p[ax] - a.p[ax]) / dt, -10, 10);
+      }
+      b.hunts = 0;
+    } else {
+      setGrabPaw(-1);
+      if (quick) startle(grab.target);
+    }
+    grab = null;
+  } else if (pointer.mode === 'touch' && quick && !pointer.petting) startle(pointer.world);
+  pointer.mode = null; pointer.petting = false; pointer.down = false;
+  setCursor('');
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('pointerleave', () => { if (!grab) { cursorEl.classList.remove('on'); pointer.inside = false; } });
+
+/* =====================================================================
+   Embed API: URL parameters in, postMessage both ways (see the comment at the top)
+   ===================================================================== */
+const ACCENT = keys.findIndex(k => k.label === 'esc');
+const EYE_NAMES = { ambar: 0, amber: 0, verde: 1, green: 1, cobre: 2, copper: 2, azul: 3, blue: 3 };
+const HEX = /^#?[0-9a-f]{6}$/i;
+function setEyes(v) {
+  const key = String(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const hex = key in EYE_NAMES ? EYES[EYE_NAMES[key]].hex : HEX.test(key) ? '#' + key.replace('#', '') : null;
+  if (!hex) return;
+  irisUniforms.uIris.value.set(hex);
+  caps.setColorAt(ACCENT, new THREE.Color(hex));
+  caps.instanceColor.needsUpdate = true;
+}
+const setEnergy = v => { if (Number.isFinite(+v)) sim.energy = clamp(+v, 0, 100) / 100; };
+function setSound(on) { soundOn = !!on; if (soundOn) ensureAudio(); }
+const params = new URLSearchParams(location.search);
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+setEyes(params.get('eyes') || 'ambar');
+setEnergy(params.get('energy') ?? (reduceMotion.matches ? 20 : 60));
+if (HEX.test(params.get('bg') || '')) {
+  const bg = '#' + params.get('bg').replace('#', '');
+  renderer.setClearColor(bg, 1);
+  document.documentElement.style.setProperty('--bg', bg);
+}
+soundOn = params.get('sound') === '1';
+canvas.addEventListener('pointerdown', () => { if (soundOn) ensureAudio(); });   // browsers only start audio after a click
+addEventListener('message', e => {
+  const m = e.data;
+  if (!m || typeof m !== 'object') return;
+  if (m.kitten === 'yarn') { throwYarn(); balls[balls.length - 1].born = sim.time; }
+  else if (m.kitten === 'eyes') setEyes(m.value);
+  else if (m.kitten === 'energy') setEnergy(m.value);
+  else if (m.kitten === 'sound') setSound(m.value);
+});
+let sent = '', sendT = 0;
+function ui(dt) {
+  if ((sendT -= dt) <= 0 && parent !== window) {
+    sendT = 0.25;
+    while (pressTimes.length && sim.time - pressTimes[0] > 10) pressTimes.shift();
+    const state = { kitten: 'state', text: typed.slice(-300), keysPerMinute: Math.round(pressTimes.length * 6), purrs: sim.purrs };
+    const key = JSON.stringify(state);
+    if (key !== sent) { sent = key; parent.postMessage(state, '*'); }
+  }
+  if (mind.laser > 0.25 && !grab) setCursor('laser'); else if (cursorEl.classList.contains('laser')) setCursor('');
+  if (purrAmp) purrAmp.gain.setTargetAtTime(soundOn ? mind.purr * 0.22 : 0, audio.currentTime, 0.1);
+}
+
+/* =====================================================================
+   Frame loop
+   ===================================================================== */
+const _from = new THREE.Vector3(), _tgt = new THREE.Vector3(), _bFrom = new THREE.Vector3(), _bTgt = new THREE.Vector3();
+function simulate(dt) {
+  sim.time += dt;
+  think(dt);
+  keysFrame(dt);
+  buildPose();
+  placeDrivenPaws();
+  restFrame(kit.wc, kit.wa, POSE, kit.Q, kit.Ainv);
+  sim.acc += dt;
+  let n = Math.floor(sim.acc / H);
+  if (n > 10) { n = 10; sim.acc = 0; } else sim.acc -= n * H;
+  const paw = grab && grab.kind === 'paw', ball = grab && grab.kind === 'ball';
+  if (grab) { _from.copy(grab.cur); grab.cur.copy(grab.target); }
+  for (let s = 0; s < n; s++) {
+    if (grab) _tgt.lerpVectors(_from, grab.cur, (s + 1) / n);
+    step(H, paw ? _tgt : null, ball ? _tgt : null);
+  }
+}
+function present(dt) {
+  updateVisual();
+  buildMesh();
+  placeFace(dt);
+  placeKeys(false);
+  for (let j = balls.length - 1; j >= 0; j--) {
+    const b = balls[j];
+    if (b.dying && (b.dying -= dt) <= 0) { removeBall(b); continue; }
+    ballVisual(b, dt);
+  }
+}
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  simulate(dt);
+  present(dt);
+  renderer.render(scene, camera);
+  ui(dt);
+}
+
+/* =====================================================================
+   Self-test: open the page with ?selftest
+   ===================================================================== */
+function runSelfTest() {
+  const lines = [], ok = (name, pass, info = '') => { lines.push(`${pass ? 'PASS' : 'FAIL'}  ${name}  ${info}`); return pass; };
+  const frameStep = (secs, opts = {}) => {
+    for (let t = 0; t < secs; t += 1 / 60) {
+      sim.time += 1 / 60;
+      if (opts.think) think(1 / 60);
+      keysFrame(1 / 60);
+      buildPose(); placeDrivenPaws(); restFrame(kit.wc, kit.wa, POSE, kit.Q, kit.Ainv);
+      for (let s = 0; s < 4; s++) step(H, opts.target || null, null);
+      updateVisual();
+      if (opts.each) opts.each();
+    }
+  };
+  const shapeErr = () => {
+    fit(kit);
+    const R = kit.R, c = kit.c, Q = kit.Q;
+    let e = 0;
+    for (let i = 0; i < T0; i++) {
+      const k = i*3, qx = Q[k], qy = Q[k+1], qz = Q[k+2];
+      e = Math.max(e, Math.hypot(kit.x[k] - (c[0] + R[0]*qx + R[1]*qy + R[2]*qz), kit.x[k+1] - (c[1] + R[3]*qx + R[4]*qy + R[5]*qz), kit.x[k+2] - (c[2] + R[6]*qx + R[7]*qy + R[8]*qz)));
+    }
+    return e;
+  };
+  const up = () => { fit(kit); return kit.R[4]; };
+  const fresh = () => { sim.ai = false; mind.paws.forEach(p => { p.driven = false; p.phase = 'rest'; }); grab = null; setGrabPaw(-1); kit.settle = 0; resetKitten(); keys.forEach(k => { k.d = k.v = 0; k.down = false; }); typed = ''; frameStep(1.5); };
+  // 1. rotation extraction
+  {
+    const q0 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.7, -1.1, 0.4));
+    const R0 = quatToMat(q0.x, q0.y, q0.z, q0.w, new Float64Array(9)), S = [1.3, 0.1, 0, 0.1, 0.8, 0.05, 0, 0.05, 1.1], A = new Float64Array(9);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) A[r*3+c] = R0[r*3]*S[c] + R0[r*3+1]*S[3+c] + R0[r*3+2]*S[6+c];
+    const q = [0, 0, 0, 1], R = new Float64Array(9);
+    extractRotation(q, A, R, 60);
+    const err = Math.max(...R.map((v, i) => Math.abs(v - R0[i])));
+    ok('polar decomposition', err < 1e-4, `err=${err.toExponential(1)}`);
+  }
+  // 2. resting kitten: keeps its shape, stays upright, resting paws do not type
+  fresh();
+  const typed0 = typed.length;
+  frameStep(2);
+  ok('sits still', shapeErr() < 0.04 && up() > 0.97, `err=${shapeErr().toFixed(3)} up=${up().toFixed(3)}`);
+  ok('resting paws type nothing', typed.length === typed0, `typed "${typed}"`);
+  updateVisual(); const t0 = performance.now(); buildMesh(); const ms = performance.now() - t0;
+  ok('fur mesh', furMC.count / 3 > 2000 && furMC.count / 3 < MAX_POLY, `${furMC.count / 3} tris, ${ms.toFixed(1)} ms`);
+  // 3. a paw strike presses the key under it and the key springs back
+  fresh();
+  const p = mind.paws[1], kk = keys[keyAt(p.spot.x, p.spot.z)];
+  p.driven = true; p.phase = 'rest';
+  strike(p, kk.x, kk.z, { hold: 0.08 });
+  let deepest = 0;
+  frameStep(0.4, { each: () => { pawGoal(p, 1 / 240 * 4); deepest = Math.max(deepest, kk.d); } });
+  p.driven = false;
+  frameStep(0.4);
+  ok('strike types a key', typed.includes(kk.label), `key "${kk.label}" depth ${deepest.toFixed(4)} typed "${typed}"`);
+  ok('key releases', !kk.down && kk.d < ACT, `d=${kk.d.toFixed(5)}`);
+  // 3b. while typing, a paw resting between strikes only touches its key lightly
+  fresh();
+  sim.ai = true; mind.idleT = 99;
+  let restDepth = 0;
+  frameStep(6, { think: true, each: () => { for (const q of mind.paws) if (q.phase === 'rest' && q.t > 0.35) { const ki = keyAt(q.spot.x, q.spot.z); if (ki >= 0) restDepth = Math.max(restDepth, keys[ki].d); } } });
+  sim.ai = false;
+  ok('resting paws touch lightly', restDepth < ACT * 0.6, `max depth under a resting paw ${restDepth.toFixed(4)} (actuates at ${ACT})`);
+  // 3c. typing does not shake the body, and the voxel grid holds still under it (no shimmering surface)
+  fresh();
+  sim.ai = true; mind.idleT = 99;
+  frameStep(0.5, { think: true });                // let the paws take their keys first
+  let p1 = null, p2 = null, boxChanges = -1, lastBox = '';
+  const jolts = [];
+  frameStep(4, { think: true, each: () => {
+    const h = [kit.x[CHEST*3], kit.x[CHEST*3+1], kit.x[CHEST*3+2]];
+    if (p2) jolts.push(Math.hypot(h[0] - 2*p1[0] + p2[0], h[1] - 2*p1[1] + p2[1], h[2] - 2*p1[2] + p2[2]) * 1000);
+    p2 = p1; p1 = h;
+    buildMesh();
+    const bx = kit.meshBox.join(); if (bx !== lastBox) { boxChanges++; lastBox = bx; }
+  } });
+  sim.ai = false;
+  jolts.sort((a, b) => a - b);
+  const j90 = jolts[Math.floor(jolts.length * 0.9)], jmax = jolts[jolts.length - 1];
+  ok('steady while typing', j90 < 1 && jmax < 3 && boxChanges <= 2, `chest jolt p90 ${j90.toFixed(2)} max ${jmax.toFixed(2)} mm/frame², grid changes ${boxChanges}, typed ${typed.length}`);
+  // 4. pull a paw hard: the leg stays firm (the paw only goes as far as it reaches); let go: back in place
+  fresh();
+  const pk = PAW_R * 3, start = new THREE.Vector3(kit.x[pk], kit.x[pk+1], kit.x[pk+2]), end = start.clone().add(new THREE.Vector3(0.35, 0.4, 0.25)), tg = start.clone();
+  grab = { kind: 'paw' }; setGrabPaw(PAW_R);
+  let tt = 0;
+  frameStep(0.7, { target: tg, each: () => { tt += 1 / 60; tg.lerpVectors(start, end, Math.min(1, tt / 0.35)); } });
+  updateVisual();
+  const moved = Math.hypot(kit.x[pk] - start.x, kit.x[pk+1] - start.y, kit.x[pk+2] - start.z);
+  ok('firm under a pull', kit.stretch < 1.35 && moved > 0.08 && up() > 0.8, `leg x${kit.stretch.toFixed(2)}, paw moved ${moved.toFixed(2)}, up=${up().toFixed(2)}`);
+  setGrabPaw(-1); grab = null;
+  frameStep(2.5);
+  ok('springs back', shapeErr() < 0.05 && up() > 0.95, `err=${shapeErr().toFixed(3)} up=${up().toFixed(2)}`);
+  // 5. a poke: startle hop, then back on its spot
+  fresh();
+  sim.ai = true;
+  startle(new THREE.Vector3(kit.c[0], 0.5, kit.c[2] + 0.5));
+  let peak = 0;
+  frameStep(3, { think: true, each: () => { peak = Math.max(peak, kit.x[HIP*3+1]); } });
+  const hd = Math.hypot(kit.c[0] - HOME[0] - REST_C[0], kit.c[2] - HOME[2] - REST_C[2]);
+  ok('startle hop and recover', peak > 0.25 && up() > 0.95 && hd < 0.12, `hip peak ${peak.toFixed(2)} up=${up().toFixed(2)} home ${hd.toFixed(2)}`);
+  // 6. yarn dropped on the board presses keys and never sinks into it
+  fresh();
+  throwYarn();
+  const b = balls[balls.length - 1];
+  b.x.set([0.3, 0.6, 0]); b.p.set(b.x); b.v.fill(0);
+  let minGap = Infinity, finite = true;
+  const typedBefore = typed.length;
+  frameStep(1.2, { each: () => { minGap = Math.min(minGap, b.x[1] - (KEY_TOP - TRAVEL + YARN_R)); if (!b.x.every(Number.isFinite)) finite = false; } });
+  ok('yarn presses keys', typed.length > typedBefore && finite && minGap > -0.006, `typed "${typed.slice(typedBefore, typedBefore + 20)}" min gap ${minGap.toFixed(4)}`);
+  removeBall(b);
+  // done: back to a calm kitten
+  sim.ai = true; grab = null; setGrabPaw(-1); resetKitten(); typed = ''; pressTimes.length = 0; sim.purrs = 0;
+  mind.startleT = mind.irritT = mind.puff = 0;
+  const report = lines.join('\n');
+  console.log(`[kitten selftest]\n${report}`);
+  document.body.insertAdjacentHTML('beforeend', `<div id="selftest">${report}</div>`);
+  window.__selftest = { pass: lines.every(l => l.startsWith('PASS')), report };
+}
+
+layout();
+addEventListener('resize', layout);
+if (new URLSearchParams(location.search).has('selftest')) runSelfTest();
+window.__kittenReady = true;
+if (CAPTURE) {
+  window.captureFrames = (seconds, fps) => {
+    mind.idleT = 1e9;   // keep typing: no idle detours inside the loop
+    const dt = 1 / fps, out = [];
+    for (let i = 0; i < Math.round(seconds * fps); i++) {
+      simulate(dt);
+      present(dt);
+      renderer.render(scene, camera);
+      out.push(canvas.toDataURL('image/png'));   // same task as render, so the buffer is still there
+    }
+    return out;
+  };
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -7,7 +7,11 @@ import ServiceManagement
 @MainActor
 @Observable
 final class AppState {
-    private(set) var activeMeeting: Meeting?
+    private(set) var activeMeeting: Meeting? {
+        didSet {
+            if (oldValue == nil) != (activeMeeting == nil) { meetingActiveHandler(activeMeeting != nil) }
+        }
+    }
     private(set) var isRecording = false
     private(set) var systemSource: CaptureEngine.SystemSource?
     private(set) var isMicRecording = false
@@ -33,6 +37,7 @@ final class AppState {
     private var policy = AutoRecordPolicy()
     private var voicePrompts = VoicePromptSchedule()
     @ObservationIgnored private var voicePromptHandler: (Int64?) -> Void = { _ in }
+    @ObservationIgnored private var meetingActiveHandler: (Bool) -> Void = { _ in }
     @ObservationIgnored private var promptedMeetingId: Int64?
     @ObservationIgnored private var externalChanges: NSObjectProtocol?
     @ObservationIgnored private let summarizer: Summarizer
@@ -301,6 +306,12 @@ final class AppState {
     }
 
     /// Shows (a meeting id) or hides (nil) the "who was speaking?" prompt.
+    /// Called when a meeting starts or ends.
+    func onMeetingActive(_ handler: @escaping (Bool) -> Void) {
+        meetingActiveHandler = handler
+        handler(isMeetingActive)
+    }
+
     func onVoicePrompt(_ handler: @escaping (Int64?) -> Void) {
         voicePromptHandler = handler
         promptedMeetingId = nil

@@ -33,7 +33,8 @@ let package = Package(
             dependencies: [
                 "KuronekoCore",
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
-            ]
+            ],
+            resources: [.copy("Resources/TypingCat")]
         ),
         .testTarget(
             name: "KuronekoCoreTests",
