@@ -34,6 +34,8 @@ public struct MeetingListItem: Codable, Equatable, Sendable {
     public var attachmentCount: Int
     /// Pendências not done yet: summary lines and #acao notes.
     public var openTaskCount: Int
+    /// Something new the user hasn't seen (a summary written by itself).
+    public var newsAt: Date?
 }
 
 /// Everything about one meeting, in the shape every client reads: the
@@ -184,7 +186,8 @@ extension AppDatabase {
                     documents: documents[id] ?? [],
                     links: (links[id] ?? []).map(MeetingExport.Link.init),
                     attachmentCount: attachments[id] ?? 0,
-                    openTaskCount: openTasks[id]?.count ?? 0
+                    openTaskCount: openTasks[id]?.count ?? 0,
+                    newsAt: meeting.newsAt
                 )
             }
         }

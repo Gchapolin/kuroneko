@@ -56,15 +56,13 @@ struct KuronekoCommand {
             changed()
             try output(["removed": noteId])
         case .summarize(let meetingId):
-            let meeting = try export(meetingId, db: db)
-            guard meeting.timeline.contains(where: { $0.type == "speech" }) else {
-                throw CLIError("a reunião \(meetingId) ainda não tem transcrição")
+            _ = try export(meetingId, db: db)
+            let document: MeetingDocument
+            do {
+                document = try Summarizer(db: db).summarize(meetingId: meetingId)
+            } catch let error as SummaryError {
+                throw CLIError(error.description)
             }
-            let body = try Claude.run(
-                prompt: SummaryPrompt.instructions,
-                input: TranscriptText.render(meeting, includeDocuments: false)
-            )
-            let document = try db.setDocument(meetingId: meetingId, kind: "summary", body: body, source: "claude")
             changed()
             try output(MeetingExport.Document(document))
         case .documentSet(let meetingId, let kind):
@@ -148,47 +146,6 @@ struct KuronekoCommand {
     static func fail(_ message: String, code: Int32) -> Never {
         FileHandle.standardError.write(Data("kuroneko: \(message)\n".utf8))
         exit(code)
-    }
-}
-
-/// Runs `claude -p` (Claude Code, with the user's own account): the
-/// instructions as the prompt, the transcript on stdin.
-enum Claude {
-    static func run(prompt: String, input: String) throws -> String {
-        let process = Process()
-        if let path = ProcessInfo.processInfo.environment["KURONEKO_CLAUDE"] {
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = ["-p", prompt]
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["claude", "-p", prompt]
-        }
-        let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-        process.standardInput = stdin
-        process.standardOutput = stdout
-        process.standardError = stderr
-        do {
-            try process.run()
-        } catch {
-            throw CLIError("não foi possível rodar o claude: \(error.localizedDescription)")
-        }
-        // Written from another thread: a large transcript would otherwise
-        // fill the pipe while claude is still starting up.
-        let writer = Thread {
-            stdin.fileHandleForWriting.write(Data(input.utf8))
-            try? stdin.fileHandleForWriting.close()
-        }
-        writer.start()
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errors = stderr.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let detail = String(decoding: errors, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CLIError("o claude falhou (\(process.terminationStatus))\(detail.isEmpty ? "" : ": \(detail)")")
-        }
-        let text = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw CLIError("o claude não devolveu nada") }
-        return text
     }
 }
 

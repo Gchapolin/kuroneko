@@ -16,8 +16,15 @@ final class AppState {
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
     private(set) var extraVocabulary: String
     private(set) var hiddenFromScreenCapture: Bool
+    private(set) var autoSummarize: Bool
     /// Bumped whenever stored data changes; views reload on it.
     private(set) var dataVersion = 0
+    /// Meetings whose summary is being written or waits its turn.
+    private(set) var summarizing: Set<Int64> = []
+    /// Why the last summary of a meeting failed, until it is tried again.
+    private(set) var summaryFailures: [Int64: String] = [:]
+    /// Meetings with something new the user hasn't seen, latest first.
+    private(set) var meetingsWithNews: [Meeting] = []
 
     let db: AppDatabase
     let storage: MeetingStorage
@@ -28,6 +35,9 @@ final class AppState {
     @ObservationIgnored private var voicePromptHandler: (Int64?) -> Void = { _ in }
     @ObservationIgnored private var promptedMeetingId: Int64?
     @ObservationIgnored private var externalChanges: NSObjectProtocol?
+    @ObservationIgnored private let summarizer: Summarizer
+    @ObservationIgnored private var summaryQueue: [(meetingId: Int64, automatic: Bool)] = []
+    @ObservationIgnored private var summaryTask: Task<Void, Never>?
     private let tabReader = ChromeTabReader()
     private var lastChromeState: String?
     private var lastTabError: ChromeTabsError?
@@ -36,6 +46,7 @@ final class AppState {
 
     private static let autoRecordKey = "autoRecord"
     private static let hiddenFromScreenCaptureKey = "hiddenFromScreenCapture"
+    static let autoSummarizeKey = "autoSummarize"
     nonisolated static let vocabularyKey = "extraVocabulary"
 
     init(db: AppDatabase, storage: MeetingStorage) {
@@ -44,6 +55,8 @@ final class AppState {
         autoRecord = UserDefaults.standard.object(forKey: Self.autoRecordKey) as? Bool ?? true
         extraVocabulary = UserDefaults.standard.string(forKey: Self.vocabularyKey) ?? ""
         hiddenFromScreenCapture = UserDefaults.standard.object(forKey: Self.hiddenFromScreenCaptureKey) as? Bool ?? true
+        autoSummarize = UserDefaults.standard.object(forKey: Self.autoSummarizeKey) as? Bool ?? true
+        summarizer = Summarizer(db: db)
         let processor = MeetingProcessor(
             db: db,
             engines: .live(modelsDirectory: storage.root.appendingPathComponent("models", isDirectory: true)),
@@ -57,7 +70,10 @@ final class AppState {
         processing = ProcessingQueue(db: db, processor: processor)
         processing.recordingMeetingId = { [weak self] in self?.activeMeeting?.id }
         processing.onChange = { [weak self] in self?.dataVersion += 1 }
-        processing.onTranscribed = { [weak self] id in self?.askAboutVoices(of: id) }
+        processing.onTranscribed = { [weak self] id in
+            self?.askAboutVoices(of: id)
+            self?.summarizeByItself(id)
+        }
         capture.onLateMicStart = { [weak self] url in
             Task { @MainActor in self?.lateMicStarted(url) }
         }
@@ -70,6 +86,7 @@ final class AppState {
             MainActor.assumeIsolated { self?.dataChangedElsewhere() }
         }
         closeStaleMeeting()
+        refreshNews()
         startMonitor()
         processing.kick()
     }
@@ -169,6 +186,91 @@ final class AppState {
         perform("apagar a reunião") { try db.deleteMeeting(id) }
         voicePrompts.remove(id)
         updateVoicePrompt()
+        refreshNews()
+    }
+
+    // MARK: - Summaries and news
+
+    var hasNews: Bool {
+        !meetingsWithNews.isEmpty
+    }
+
+    func isSummarizing(_ meetingId: Int64) -> Bool {
+        summarizing.contains(meetingId)
+    }
+
+    /// "Gerar resumo" and "Gerar de novo": replaces the summary there is.
+    func summarize(_ meetingId: Int64) {
+        enqueueSummary(meetingId, automatic: false)
+    }
+
+    /// The user opened the meeting.
+    func markNewsSeen(_ meetingId: Int64) {
+        guard meetingsWithNews.contains(where: { $0.id == meetingId }) else { return }
+        perform("marcar a novidade como vista") { try db.markSeen(meetingId: meetingId) }
+        refreshNews()
+    }
+
+    func setAutoSummarize(_ enabled: Bool) {
+        autoSummarize = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.autoSummarizeKey)
+    }
+
+    /// Right after a meeting is transcribed, when it has speech and no
+    /// summary yet; the menu then shows it as news.
+    private func summarizeByItself(_ meetingId: Int64) {
+        guard autoSummarize else { return }
+        do {
+            guard try summarizer.needsSummary(meetingId: meetingId) else { return }
+            enqueueSummary(meetingId, automatic: true)
+        } catch {
+            FileLog.shared.append("resumo: reunião \(meetingId) não verificada: \(error)")
+        }
+    }
+
+    /// One summary at a time, off the main actor and apart from the
+    /// transcription queue, which it never holds up.
+    private func enqueueSummary(_ meetingId: Int64, automatic: Bool) {
+        guard !summarizing.contains(meetingId) else { return }
+        summarizing.insert(meetingId)
+        summaryFailures[meetingId] = nil
+        summaryQueue.append((meetingId, automatic))
+        guard summaryTask == nil else { return }
+        summaryTask = Task { [weak self] in
+            while let next = self?.summaryQueue.first {
+                self?.summaryQueue.removeFirst()
+                await self?.writeSummary(next.meetingId, automatic: next.automatic)
+            }
+            self?.summaryTask = nil
+        }
+    }
+
+    private func writeSummary(_ meetingId: Int64, automatic: Bool) async {
+        FileLog.shared.append("resumo: gerando o da reunião \(meetingId)\(automatic ? " (sozinho)" : "")")
+        let summarizer = summarizer
+        let result = await Task.detached(priority: .utility) {
+            Result { try summarizer.summarize(meetingId: meetingId, markingNews: automatic) }
+        }.value
+        summarizing.remove(meetingId)
+        switch result {
+        case .success:
+            FileLog.shared.append("resumo: reunião \(meetingId) pronto")
+            dataVersion += 1
+            refreshNews()
+        case .failure(let error):
+            // The meeting offers "Gerar resumo" again; nothing else to do.
+            FileLog.shared.append("resumo: reunião \(meetingId) FALHOU: \(error)")
+            logger.error("Falha ao gerar o resumo da reunião \(meetingId): \(String(describing: error))")
+            summaryFailures[meetingId] = String(describing: error)
+        }
+    }
+
+    private func refreshNews() {
+        do {
+            meetingsWithNews = try db.meetingsWithNews()
+        } catch {
+            report(error, while: "ler as novidades")
+        }
     }
 
     // MARK: - Who was speaking?
@@ -208,6 +310,7 @@ final class AppState {
 
     private func dataChangedElsewhere() {
         dataVersion += 1
+        refreshNews()
         for meetingId in voicePrompts.meetingIds {
             settleVoicePrompt(meetingId)
         }

@@ -45,6 +45,9 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
     public var audioSystemPath: String?
     public var status: ProcessingStatus
     public var statusDetail: String?
+    /// Something new the user hasn't seen yet, such as a summary written by
+    /// itself; cleared when the meeting is opened.
+    public var newsAt: Date?
 
     public init(
         id: Int64? = nil,
@@ -57,7 +60,8 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
         audioMicPath: String? = nil,
         audioSystemPath: String? = nil,
         status: ProcessingStatus = .recording,
-        statusDetail: String? = nil
+        statusDetail: String? = nil,
+        newsAt: Date? = nil
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -70,6 +74,7 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
         self.audioSystemPath = audioSystemPath
         self.status = status
         self.statusDetail = statusDetail
+        self.newsAt = newsAt
     }
 
     /// Milliseconds from the start of the audio to `date`.

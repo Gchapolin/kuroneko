@@ -179,6 +179,12 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v6") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "newsAt", .datetime)
+            }
+        }
+
         return migrator
     }
 
@@ -269,6 +275,27 @@ public final class AppDatabase: Sendable {
                 .filter(Column("endedAt") == nil)
                 .order(Column("startedAt").desc)
                 .fetchOne(db)
+        }
+    }
+
+    /// Something new about the meeting is waiting for the user.
+    public func markNews(meetingId: Int64, at date: Date = Date()) throws {
+        try writer.write { db in
+            _ = try Meeting.filter(key: meetingId).updateAll(db, Column("newsAt").set(to: date))
+        }
+    }
+
+    /// The user opened the meeting.
+    public func markSeen(meetingId: Int64) throws {
+        try writer.write { db in
+            _ = try Meeting.filter(key: meetingId).updateAll(db, Column("newsAt").set(to: nil))
+        }
+    }
+
+    /// Meetings with news, latest news first.
+    public func meetingsWithNews() throws -> [Meeting] {
+        try writer.read { db in
+            try Meeting.filter(Column("newsAt") != nil).order(Column("newsAt").desc).fetchAll(db)
         }
     }
 
