@@ -202,8 +202,9 @@ import Testing
     }
 
     /// System talks 1–4 s and 6–9 s with a varying envelope; the mic hears it
-    /// back 50 ms later at a lower level, and the user talks 11–13 s alone.
-    private func scenario() -> (mic: [Float], system: [Float]) {
+    /// back 50 ms later (or `laterDelay` from 5 s on) at a lower level, and
+    /// the user talks 11–13 s alone.
+    private func scenario(laterDelay: Double = 0.05) -> (mic: [Float], system: [Float]) {
         let total = 14 * rate
         var system = [Float](repeating: 0, count: total)
         for (start, seconds) in [(1.0, 3.0), (6.0, 3.0)] {
@@ -215,9 +216,11 @@ import Testing
             }
         }
         var mic = noiseBurst(seconds: 14, seed: 99, amplitude: 0.0005)
-        let delay = Int(0.05 * Double(rate))
-        for index in delay..<total {
-            mic[index] += 0.3 * system[index - delay]
+        for index in 0..<total {
+            let delay = Int((index < 5 * rate ? 0.05 : laterDelay) * Double(rate))
+            if index >= delay {
+                mic[index] += 0.3 * system[index - delay]
+            }
         }
         let me = noiseBurst(seconds: 2, seed: 7)
         for (offset, sample) in me.enumerated() {
@@ -228,6 +231,21 @@ import Testing
 
     @Test func dropsEchoAndKeepsTheUser() {
         let (mic, system) = scenario()
+        let spans = [
+            SpeechSpan(start: 1, end: 4, speaker: "me"),
+            SpeechSpan(start: 6, end: 9, speaker: "me"),
+            SpeechSpan(start: 11, end: 13, speaker: "me"),
+        ]
+
+        let kept = EchoGate.filter(spans: spans, mic: mic, system: system)
+
+        #expect(kept == [SpeechSpan(start: 11, end: 13, speaker: "me")])
+    }
+
+    /// The delay jumped mid-call in a real meeting; echo after the jump
+    /// went to the user when one delay was used for the whole recording.
+    @Test func dropsEchoAfterTheDelayChanges() {
+        let (mic, system) = scenario(laterDelay: 0.18)
         let spans = [
             SpeechSpan(start: 1, end: 4, speaker: "me"),
             SpeechSpan(start: 6, end: 9, speaker: "me"),

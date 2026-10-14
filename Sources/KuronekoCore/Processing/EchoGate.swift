@@ -7,20 +7,30 @@ import Foundation
 /// echoing the call, not the user talking. Echo is dropped (that speech is
 /// already in the system channel, with the right speaker); double talk is
 /// kept as the user's.
+///
+/// The delay is not constant: in a real hour-long call it drifted from
+/// -60 ms to -10 ms and then jumped to +100 ms (the two devices run on their
+/// own clocks and either side can drop buffers). One delay for the whole
+/// meeting stopped recognizing echo after the jump, so it is measured around
+/// each utterance.
 public enum EchoGate {
     static let frameSize = 160 // 10 ms at 16 kHz
     static let lagRange = -20...60 // frames: device latencies, speaker → mic
     static let minSystemActivity = 0.3
     static let echoCorrelation: Float = 0.6
+    /// Audio around an utterance also used to measure its delay: 2 s.
+    static let lagContext = 200
 
     public static func filter(spans: [SpeechSpan], mic: [Float], system: [Float]) -> [SpeechSpan] {
         guard !spans.isEmpty, !mic.isEmpty, !system.isEmpty else { return spans }
         let micEnvelope = envelope(mic)
         let systemEnvelope = envelope(system)
-        let lag = estimateLag(mic: micEnvelope, system: systemEnvelope)
         let systemFloor = percentile(systemEnvelope, 0.1)
         return spans.filter { span in
-            !isEcho(span, mic: micEnvelope, system: systemEnvelope, lag: lag, systemFloor: systemFloor)
+            let spoken = frames(of: span, count: micEnvelope.count)
+            let around = max(0, spoken.lowerBound - lagContext)..<min(micEnvelope.count, spoken.upperBound + lagContext)
+            let lag = estimateLag(mic: micEnvelope, system: systemEnvelope, in: around)
+            return !isEcho(span, mic: micEnvelope, system: systemEnvelope, lag: lag, systemFloor: systemFloor)
         }
     }
 
@@ -35,12 +45,13 @@ public enum EchoGate {
         }
     }
 
-    /// The delay (in frames) at which the mic best follows the system audio:
-    /// mic[t] ≈ system[t - lag].
-    static func estimateLag(mic: [Float], system: [Float]) -> Int {
+    /// The delay (in frames) at which the mic best follows the system audio
+    /// over `range` (the whole recording by default): mic[t] ≈ system[t - lag].
+    static func estimateLag(mic: [Float], system: [Float], in range: Range<Int>? = nil) -> Int {
+        let range = range ?? 0..<mic.count
         var best = (lag: 0, correlation: -Float.infinity)
         for lag in lagRange {
-            let pairs = alignedPairs(mic: mic, system: system, lag: lag, range: 0..<mic.count)
+            let pairs = alignedPairs(mic: mic, system: system, lag: lag, range: range)
             let correlation = pearson(pairs)
             if correlation > best.correlation {
                 best = (lag, correlation)
@@ -50,15 +61,20 @@ public enum EchoGate {
     }
 
     static func isEcho(_ span: SpeechSpan, mic: [Float], system: [Float], lag: Int, systemFloor: Float) -> Bool {
-        let first = max(0, Int(span.start * 100))
-        let last = min(mic.count, Int(span.end * 100))
-        guard last > first else { return false }
-        let pairs = alignedPairs(mic: mic, system: system, lag: lag, range: first..<last)
+        let spoken = frames(of: span, count: mic.count)
+        guard !spoken.isEmpty else { return false }
+        let pairs = alignedPairs(mic: mic, system: system, lag: lag, range: spoken)
         guard !pairs.isEmpty else { return false }
         let active = pairs.filter { $0.1 > systemFloor + 15 }.count
         // The user talking while the call is quiet is never echo.
         guard Double(active) / Double(pairs.count) >= minSystemActivity else { return false }
         return pearson(pairs) >= echoCorrelation
+    }
+
+    /// The envelope frames (10 ms each) an utterance covers.
+    private static func frames(of span: SpeechSpan, count: Int) -> Range<Int> {
+        let first = min(count, max(0, Int(span.start * 100)))
+        return first..<max(first, min(count, Int(span.end * 100)))
     }
 
     private static func alignedPairs(mic: [Float], system: [Float], lag: Int, range: Range<Int>) -> [(Float, Float)] {

@@ -72,7 +72,7 @@ Integrações (Neovim em `gandarfh/kuroneko.nvim`, IDEs, web local) falam só co
 
 ## Current Focus
 
-Captura automática do Meet, pipeline de transcrição, revisão (janela de reuniões, nomear vozes, ouvir trechos), nota rápida e busca prontos (out/2026). Ao fim de cada transcrição com vozes sem nome aparece um cartão flutuante (`VoicePrompt`) com as pessoas conhecidas da voz mais parecida para a menos (`VoiceReview`); some sozinho em 10s sem interação e fica no menu do gato ("Dizer quem falou…"). `SpeakerMatcher.threshold` (0.55) validado no AMI: mesma pessoa 0.92–0.97, pessoas diferentes ≤ 0.32. Pendentes: calibrar `EchoGate` com mic real (o log registra o eco descartado), calls muito curtas (1–2 min) podem juntar vozes (há o `@Nome` como fallback), resumo semanal (decidir LLM local ou não), huddle do Slack.
+Captura automática do Meet, pipeline de transcrição, revisão (janela de reuniões, nomear vozes, ouvir trechos), nota rápida e busca prontos (out/2026). Ao fim de cada transcrição com vozes sem nome aparece um cartão flutuante (`VoicePrompt`) com as pessoas conhecidas da voz mais parecida para a menos (`VoiceReview`); some sozinho em 10s sem interação e fica no menu do gato ("Dizer quem falou…"). `SpeakerMatcher.threshold` (0.55) validado no AMI: mesma pessoa 0.92–0.97, pessoas diferentes ≤ 0.32. `EchoGate` validado numa call real com caixa de som (eco correlaciona 0.88–0.97, a voz do usuário ≤ 0.34); o atraso mic↔sistema muda no meio da call (deriva e pula ~150 ms), por isso é medido em volta de cada fala. Pendentes: calls muito curtas (1–2 min) podem juntar vozes (há o `@Nome` como fallback), resumo semanal (decidir LLM local ou não), huddle do Slack.
 
 ## Known Issues
 
