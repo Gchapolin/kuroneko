@@ -17,6 +17,8 @@ public enum CLICommand: Equatable, Sendable {
     case documentRemove(meetingId: Int64, kind: String)
     case linkAdd(meetingId: Int64, url: String, title: String?)
     case linkRemove(linkId: Int64)
+    case tasks
+    case taskDone(TaskRef, done: Bool)
     case play(meetingId: Int64, fromMs: Int)
     case help
 
@@ -36,6 +38,8 @@ public enum CLICommand: Equatable, Sendable {
           kuroneko doc rm <id> <tipo>
           kuroneko link add <id> <url> [título]     guarda um link da reunião (PR, ticket, doc)
           kuroneko link rm <id-do-link>
+          kuroneko tasks                            pendências abertas de todas as reuniões
+          kuroneko task done|undo <ref>             marca a pendência como feita (ou não)
           kuroneko play <id> [--at <tempo>]         toca até o fim ou Ctrl-C; imprime a posição
 
         <tempo>: 03:21, 1:03:21, 201000ms ou segundos.
@@ -111,6 +115,15 @@ public enum CLICommand: Equatable, Sendable {
             default:
                 throw CLIError("uso: kuroneko link add|rm …")
             }
+        case "tasks":
+            try expectNoMore(args)
+            return .tasks
+        case "task":
+            guard args.count == 2, ["done", "undo"].contains(args[0]) else {
+                throw CLIError("uso: kuroneko task done|undo <ref>")
+            }
+            guard let ref = TaskRef(args[1]) else { throw CLIError("pendência inválida: \(args[1])") }
+            return .taskDone(ref, done: args[0] == "done")
         case "play":
             let id = try takeId(&args)
             let at = try takeOption("--at", from: &args)

@@ -98,6 +98,8 @@ public enum SummaryPrompt {
         De 3 a 6 frases sobre o que foi tratado.
 
         ## Decisões
+        Uma por linha: "- o quê [mm:ss]".
+
         ## Pendências
         Uma por linha: "- [ ] o quê — quem (se foi dito) [mm:ss]".
 

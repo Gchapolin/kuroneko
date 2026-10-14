@@ -32,6 +32,8 @@ public struct MeetingListItem: Codable, Equatable, Sendable {
     public var links: [MeetingExport.Link]
     /// Files attached to its notes (prints).
     public var attachmentCount: Int
+    /// Pendências not done yet: summary lines and #acao notes.
+    public var openTaskCount: Int
 }
 
 /// Everything about one meeting, in the shape every client reads: the
@@ -112,6 +114,19 @@ public struct MeetingExport: Codable, Equatable, Sendable {
         }
     }
 
+    /// A pendência ("task") or decisão ("decision") read from the summary.
+    public struct Item: Codable, Equatable, Sendable {
+        public var kind: String
+        public var text: String
+        public var owner: String?
+        public var startMs: Int?
+        public var done: Bool
+        /// Line of the summary, from 0.
+        public var line: Int
+        /// For `kuroneko task done|undo`; pendências only.
+        public var ref: String?
+    }
+
     public struct Document: Codable, Equatable, Sendable {
         public var kind: String
         public var body: String
@@ -140,6 +155,8 @@ public struct MeetingExport: Codable, Equatable, Sendable {
     public var timeline: [Entry]
     public var documents: [Document]
     public var links: [Link]
+    /// Pendências and decisões of the summary, in its order.
+    public var summaryItems: [Item]
 }
 
 extension AppDatabase {
@@ -149,6 +166,7 @@ extension AppDatabase {
         let documents = try documentKinds()
         let links = try linksByMeeting()
         let attachments = try attachmentCounts()
+        let openTasks = Dictionary(grouping: try openTasks(), by: \.meetingId)
         return WeekGrouping.group(try meetings(), now: now, calendar: calendar).flatMap { group in
             group.meetings.compactMap { meeting -> MeetingListItem? in
                 guard let id = meeting.id else { return nil }
@@ -165,7 +183,8 @@ extension AppDatabase {
                     noteCount: notes[id] ?? 0,
                     documents: documents[id] ?? [],
                     links: (links[id] ?? []).map(MeetingExport.Link.init),
-                    attachmentCount: attachments[id] ?? 0
+                    attachmentCount: attachments[id] ?? 0,
+                    openTaskCount: openTasks[id]?.count ?? 0
                 )
             }
         }
@@ -249,7 +268,20 @@ extension AppDatabase {
             voices: voices,
             timeline: timeline,
             documents: try documents(meetingId: meetingId).map(MeetingExport.Document.init),
-            links: try links(meetingId: meetingId).map(MeetingExport.Link.init)
+            links: try links(meetingId: meetingId).map(MeetingExport.Link.init),
+            summaryItems: try summaryItems(meetingId: meetingId).map { item in
+                MeetingExport.Item(
+                    kind: item.kind,
+                    text: item.text,
+                    owner: item.owner,
+                    startMs: item.startMs,
+                    done: item.done,
+                    line: item.line,
+                    ref: item.kind == "task"
+                        ? TaskRef.summary(meetingId: meetingId, line: item.line, fingerprint: item.fingerprint).description
+                        : nil
+                )
+            }
         )
     }
 }

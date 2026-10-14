@@ -136,6 +136,11 @@ final class AppState {
         perform("apagar o link") { try db.deleteLink(id) }
     }
 
+    /// Checks a pendência off or back on, from the summary or a #acao note.
+    func setTaskDone(_ ref: TaskRef, _ done: Bool) {
+        perform(done ? "marcar a pendência como feita" : "reabrir a pendência") { try db.setTaskDone(ref, done) }
+    }
+
     func renameMeeting(_ id: Int64, to title: String) {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }

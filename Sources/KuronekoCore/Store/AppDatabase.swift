@@ -396,6 +396,26 @@ public final class AppDatabase: Sendable {
         try writer.read { db in try Note.fetchOne(db, key: id) }
     }
 
+    /// Notes of every meeting carrying the tag (without the #).
+    public func notes(tagged tag: String) throws -> [Note] {
+        try writer.read { db in
+            try Note.fetchAll(db, sql: """
+                SELECT note.* FROM note
+                WHERE EXISTS (SELECT 1 FROM json_each(note.tags) WHERE value = ?)
+                ORDER BY note.meetingId, note.tMs
+                """, arguments: [tag])
+        }
+    }
+
+    /// Done (a #acao note is a pendência) or not done.
+    public func setNoteResolved(_ id: Int64, _ resolved: Bool, at date: Date = Date()) throws {
+        try writer.write { db in
+            guard var note = try Note.fetchOne(db, key: id) else { return }
+            note.resolvedAt = resolved ? (note.resolvedAt ?? date) : nil
+            try note.update(db)
+        }
+    }
+
     /// Attachments of every note of the meeting, in the order they were added.
     public func attachments(meetingId: Int64) throws -> [NoteAttachment] {
         try writer.read { db in
@@ -443,6 +463,35 @@ public final class AppDatabase: Sendable {
             document.source = source
             document.updatedAt = date
             try document.save(db)
+            return document
+        }
+    }
+
+    /// Every meeting's text of that kind.
+    public func documents(kind: String) throws -> [MeetingDocument] {
+        try writer.read { db in
+            try MeetingDocument.filter(Column("kind") == kind).order(Column("meetingId")).fetchAll(db)
+        }
+    }
+
+    /// Changes a text in one transaction, so an edit made meanwhile from
+    /// elsewhere is not lost: `change` gets the body and returns the new one,
+    /// or nil to leave it as it is. Nil when there is no such text.
+    @discardableResult
+    public func updateDocument(
+        meetingId: Int64,
+        kind: String,
+        at date: Date = Date(),
+        _ change: (String) throws -> String?
+    ) throws -> MeetingDocument? {
+        try writer.write { db in
+            guard var document = try MeetingDocument
+                .filter(Column("meetingId") == meetingId && Column("kind") == kind)
+                .fetchOne(db) else { return nil }
+            guard let body = try change(document.body), body != document.body else { return document }
+            document.body = body
+            document.updatedAt = date
+            try document.update(db)
             return document
         }
     }

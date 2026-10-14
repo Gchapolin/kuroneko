@@ -88,6 +88,12 @@ struct KuronekoCommand {
             try db.deleteLink(linkId)
             changed()
             try output(["removed": linkId])
+        case .tasks:
+            try output(db.openTasks())
+        case .taskDone(let ref, let done):
+            let task = try db.setTaskDone(ref, done)
+            changed()
+            try output(task)
         case .play(let meetingId, let fromMs):
             try Playback.play(try export(meetingId, db: db), fromMs: fromMs)
         }
