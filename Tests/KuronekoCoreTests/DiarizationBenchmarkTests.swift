@@ -33,6 +33,62 @@ import Testing
         }
     }
 
+    /// The same meetings the way a call is diarized while it is recorded:
+    /// in batches of `liveBatchSeconds`, each voice followed from batch to
+    /// batch by its embedding (`LiveVoices`).
+    @Test(.enabled(if: dir != nil))
+    func followsVoicesAcrossLiveBatches() async throws {
+        let diarizer = FluidDiarizer()
+        for meeting in ["ES2004a", "ES2004b"] {
+            let samples = try AudioSamples.load(URL(fileURLWithPath: "\(Self.dir!)/\(meeting).wav"))
+            let truth = try rttm(meeting)
+            let batch = Int(MeetingProcessor.liveBatchSeconds) * AudioSamples.sampleRate
+            var voices = LiveVoices()
+            var who: [Int: String] = [:]
+            var spans: [SpeechSpan] = []
+            var same: [Float] = [], different: [Float] = []
+            for start in stride(from: 0, to: samples.count, by: batch) {
+                let chunk = Array(samples[start..<min(samples.count, start + batch)])
+                let offset = Double(start) / Double(AudioSamples.sampleRate)
+                let result = try await diarizer.diarize(chunk)
+                let shifted = result.spans.map { SpeechSpan(start: $0.start + offset, end: $0.end + offset, speaker: $0.speaker) }
+                var votes: [String: [String: Int]] = [:]
+                for pair in frames(truth, shifted, length: Double(samples.count) / 16000) {
+                    votes[pair.label, default: [:]][pair.who, default: 0] += 1
+                }
+                let majority = votes.mapValues { $0.max { $0.value < $1.value }!.key }
+                for (label, embedding) in result.embeddings {
+                    guard let person = majority[label] else { continue }
+                    for (index, voice) in voices.voices {
+                        let similarity = SpeakerMatcher.cosine(embedding, voice.embedding)
+                        if who[index] == person { same.append(similarity) } else { different.append(similarity) }
+                    }
+                }
+                var seconds: [String: Double] = [:]
+                for span in result.spans { seconds[span.speaker, default: 0] += span.duration }
+                let links = voices.link(labels: Set(result.spans.map(\.speaker)), embeddings: result.embeddings, seconds: seconds)
+                for (label, index) in links where who[index] == nil {
+                    who[index] = majority[label] ?? "?"
+                }
+                spans += shifted.map { SpeechSpan(start: $0.start, end: $0.end, speaker: "c\(links[$0.speaker]!)") }
+            }
+            let pairs = frames(truth, spans, length: Double(samples.count) / 16000)
+            var votes: [String: [String: Int]] = [:]
+            for pair in pairs { votes[pair.label, default: [:]][pair.who, default: 0] += 1 }
+            let majority = votes.mapValues { $0.max { $0.value < $1.value }!.key }
+            let correct = pairs.filter { majority[$0.label] == $0.who }.count
+            same.sort(); different.sort()
+            print(String(format: "AMI ao vivo %@: %d vozes (reais %d); fala na voz certa: %.0f%%; mesma pessoa entre lotes %.2f–%.2f (10%%: %.2f), pessoas diferentes até %.2f (90%%: %.2f)",
+                         meeting, votes.count, Set(truth.map(\.who)).count, 100 * Double(correct) / Double(max(1, pairs.count)),
+                         same.first ?? 0, same.last ?? 0, same.isEmpty ? 0 : same[same.count / 10],
+                         different.last ?? 0, different.isEmpty ? 0 : different[different.count * 9 / 10]))
+            for (label, counts) in votes.sorted(by: { $0.key < $1.key }) {
+                print("AMI ao vivo \(meeting) \(label): \(counts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value / 10)s" }.joined(separator: ", "))")
+            }
+            #expect(Double(correct) / Double(max(1, pairs.count)) >= 0.85)
+        }
+    }
+
     @Test(.enabled(if: dir != nil))
     func diarizesAndRecognizesRealMeetings() async throws {
         let diarizer = FluidDiarizer()

@@ -55,7 +55,7 @@ final class AppState {
             }
         )
         processing = ProcessingQueue(db: db, processor: processor)
-        processing.isBusyRecording = { [weak self] in self?.isMeetingActive ?? false }
+        processing.recordingMeetingId = { [weak self] in self?.activeMeeting?.id }
         processing.onChange = { [weak self] in self?.dataVersion += 1 }
         processing.onTranscribed = { [weak self] id in self?.askAboutVoices(of: id) }
         capture.onLateMicStart = { [weak self] url in
@@ -304,6 +304,10 @@ final class AppState {
             while !Task.isCancelled {
                 self?.pollChrome()
                 self?.updateVoicePrompt()
+                // Transcribes the call in batches as the audio piles up.
+                if self?.isMeetingActive == true {
+                    self?.processing.kick()
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }

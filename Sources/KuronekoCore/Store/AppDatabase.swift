@@ -402,6 +402,35 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// Adds a batch transcribed while the meeting is still being recorded:
+    /// its segments, and the voices heard so far (`speakers` replaces what is
+    /// stored about each). A voice that already has a person keeps it — the
+    /// user may have named it mid-call — and every segment of a voice takes
+    /// its person, including earlier ones.
+    public func appendTranscript(meetingId: Int64, speakers: [MeetingSpeaker], segments: [Segment]) throws {
+        try writer.write { db in
+            for var speaker in speakers {
+                let stored = try MeetingSpeaker
+                    .filter(Column("meetingId") == meetingId && Column("diarCluster") == speaker.diarCluster)
+                    .fetchOne(db)
+                speaker.personId = stored?.personId ?? speaker.personId
+                try speaker.save(db)
+            }
+            let people = try MeetingSpeaker.filter(Column("meetingId") == meetingId).fetchAll(db)
+                .reduce(into: [Int: Int64]()) { people, speaker in people[speaker.diarCluster] = speaker.personId }
+            for var segment in segments {
+                segment.id = nil
+                segment.personId = segment.diarCluster.flatMap { people[$0] }
+                try segment.insert(db)
+            }
+            for (cluster, personId) in people {
+                try Segment
+                    .filter(Column("meetingId") == meetingId && Column("diarCluster") == cluster && Column("personId") == nil)
+                    .updateAll(db, Column("personId").set(to: personId))
+            }
+        }
+    }
+
     public func speakers(meetingId: Int64) throws -> [MeetingSpeaker] {
         try writer.read { db in
             try MeetingSpeaker

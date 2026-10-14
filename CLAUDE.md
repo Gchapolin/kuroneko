@@ -2,7 +2,7 @@
 
 ## Overview
 
-App de menu bar 100% local que grava sozinho as chamadas do Google Meet (Chrome), transcreve depois da call em background (pt-BR, espanhol UY/CL e inglês), separa e reconhece as vozes, e guarda notas pessoais na linha do tempo. Nada é transcrito ao vivo: a prioridade é precisão no que foi dito e em quem disse. Nome em homenagem ao gato do João.
+App de menu bar 100% local que grava sozinho as chamadas do Google Meet (Chrome), transcreve durante a call em lotes de ~2 minutos (o texto chega uns 2 minutos atrás da conversa; não é tempo real), separa e reconhece as vozes, e guarda notas pessoais na linha do tempo. No fim da call, as vozes são separadas de novo na gravação inteira: a prioridade é precisão no que foi dito e em quem disse. Nome em homenagem ao gato do João.
 
 ## Tech Stack
 
@@ -20,7 +20,7 @@ App de menu bar 100% local que grava sozinho as chamadas do Google Meet (Chrome)
 Sources/
 ├── KuronekoCore/        # lógica sem UI, testável
 │   ├── Capture/         # tap do Chrome, mic, detecção da call (abas + saída de áudio)
-│   ├── Processing/      # pipeline pós-call: diarização, VAD, eco, idioma, ASR, vozes conhecidas
+│   ├── Processing/      # pipeline (em lotes durante a call + fechamento): diarização, VAD, eco, idioma, ASR, vozes conhecidas
 │   ├── Review/          # timeline, agrupamento por semana, busca
 │   ├── API/             # contrato JSON (MeetingExport), transcrição em Markdown, parser do `kuroneko`
 │   └── Store/           # AppDatabase (GRDB), Models, migrations, FTS5
@@ -31,6 +31,8 @@ Makefile                 # build | test | bundle | run | clean
 ```
 
 Pipeline (`MeetingProcessor`): sistema → diarização + VAD (VAD recupera falas curtas que o diarizador perde) → mic → VAD menos eco (`EchoGate`, usa system.wav como referência) → idioma por enunciado entre pt/es/en → turnos de mesma voz e mesmo idioma → Whisper por turno com vocabulário no prompt → `HallucinationFilter` → vozes casadas com voiceprints.
+
+Durante a call (`advanceLive`, agendado pelo `ProcessingQueue` a cada 2 s): quando há `liveBatchSeconds` (120 s) de áudio novo, o lote é lido do WAV ainda sendo gravado (`AudioSamples.load(_:from:to:)`), cortado na última pausa dos dois canais (`LiveCut`) e passa pelo mesmo pipeline; cada lote é diarizado sozinho e as vozes são seguidas entre lotes por embedding (`LiveVoices`, limiar 0.65). Os trechos vão para o banco a cada lote (`appendTranscript`: voz já nomeada mantém a pessoa). No fim (`process` com histórico ao vivo): último lote + diarização da gravação inteira, cujos rótulos herdam os índices da call (`VoiceRelabel`) — nomes dados durante a call ficam. Sem histórico (app reiniciou, lote falhou, call < 2 min) `process` transcreve tudo de uma vez, como antes. O processador só atende uma chamada por vez; quem serializa é o `ProcessingQueue` (call atual em lotes, reunião que acabou de terminar logo em seguida, o resto só sem call em andamento).
 
 Regra de dependência: `Kuroneko` (UI) depende de `KuronekoCore`; o core nunca importa SwiftUI/AppKit. Lógica nova vai no core com testes; a UI é casca fina.
 
@@ -63,8 +65,8 @@ Integrações (Neovim em `gandarfh/kuroneko.nvim`, IDEs, web local) falam só co
 - `make run` — monta `dist/Kuroneko.app` (Info.plist + bundles de recursos do SwiftPM + codesign com o certificado "Apple Development") e abre
 - O process tap de áudio exige rodar via bundle assinado, não via `swift run`
 - Assinatura ad-hoc faz o macOS esquecer as permissões (mic, áudio do sistema, Automação) a cada build — manter o certificado estável
-- Teste com os modelos reais (opcional, ~2 GB): `KURONEKO_E2E_AUDIO=/caminho/system.wav swift test --filter EndToEnd`
-- Benchmark de diarização e reconhecimento de vozes em reuniões reais do corpus AMI: `KURONEKO_AMI=/pasta swift test --filter DiarizationBenchmark` (instruções no teste; baseline 98%/98%)
+- Teste com os modelos reais (opcional, ~2 GB): `KURONEKO_E2E_AUDIO=/caminho/system.wav [KURONEKO_E2E_MIC=/caminho/mic.wav] swift test --filter EndToEnd` — inclui a mesma gravação reproduzida como se estivesse sendo gravada (lotes durante a call + fechamento)
+- Benchmark de diarização e reconhecimento de vozes em reuniões reais do corpus AMI: `KURONEKO_AMI=/pasta swift test --filter DiarizationBenchmark` (instruções no teste; baseline 98%/98%; em lotes de 2 min como durante a call: 92%/95%, mesma pessoa entre lotes 0.80–0.98, pessoas diferentes ≤ 0.48)
 - Vozes sintéticas do `say` não servem para testar diarização: o modelo funde vozes do macOS que soam parecidas
 - CI: `.github/workflows/ci.yml` roda `swift test` em todo push (runner `macos-26`)
 - Release: `git tag vX.Y.Z && git push origin vX.Y.Z` → `release.yml` monta o app assinado ad hoc e publica `Kuroneko-X.Y.Z.zip`, `SHA256SUMS` e `install.sh` no GitHub Release (`workflow_dispatch` = dry run sem publicar)

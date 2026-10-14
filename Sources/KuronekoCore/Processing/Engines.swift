@@ -194,7 +194,13 @@ public final class FluidDiarizer: SpeakerDiarizing, @unchecked Sendable {
 
     public func diarize(_ samples: [Float]) async throws -> Diarization {
         let manager = try await loaded()
-        let result = try await manager.process(audio: samples)
+        let result: DiarizationResult
+        do {
+            result = try await manager.process(audio: samples)
+        } catch OfflineDiarizationError.noSpeechDetected {
+            // Sound but nobody talking: a quiet batch of a call.
+            return Diarization(spans: [], embeddings: [:])
+        }
         let spans = result.segments.map { segment in
             SpeechSpan(
                 start: Double(segment.startTimeSeconds),

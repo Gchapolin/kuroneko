@@ -83,6 +83,31 @@ import Testing
         #expect(samples.suffix(1000).contains { $0 != 0 })
     }
 
+    /// Transcription during the call reads the files while they are written.
+    @Test func readsTheWavWhileItIsBeingRecorded() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let input = try makeBuffer(sampleRate: 48000, channels: 1, frames: 48000)
+
+        let writer = try ResamplingWavWriter(inputFormat: input.format, fileURL: url)
+        try writer.appendSilence(seconds: 1.5)
+        try writer.append(input)
+
+        let duration = try AudioSamples.recordedDuration(url)
+        #expect(duration > 2.4 && duration <= 2.5)
+        let recording = try AudioSamples.load(url, from: 1, to: 2)
+        #expect(recording.count == 16000)
+        #expect(recording.prefix(8000).allSatisfy { $0 == 0 })
+        #expect(recording.suffix(1000).contains { $0 != 0 })
+        // Past the end it returns what there is.
+        #expect(try AudioSamples.load(url, from: 2, to: 60).count == Int((duration - 2) * 16000))
+
+        writer.finish()
+        let whole = try AudioSamples.load(url)
+        #expect(try AudioSamples.load(url, from: 1, to: 2) == Array(whole[16000..<32000]))
+        #expect(try AudioSamples.recordedDuration(url) == Double(whole.count) / 16000)
+    }
+
     @Test func ignoresEmptyBuffers() throws {
         let url = tempWavURL()
         defer { try? FileManager.default.removeItem(at: url) }
