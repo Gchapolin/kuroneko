@@ -15,6 +15,10 @@ struct SettingsView: View {
                     get: { state.launchAtLogin },
                     set: { state.setLaunchAtLogin($0) }
                 ))
+                Toggle("Mostrar o gatinho digitando durante a gravação", isOn: Binding(
+                    get: { state.showTypingCat },
+                    set: { state.setShowTypingCat($0) }
+                ))
             }
             Section("Privacidade") {
                 Toggle("Esconder o Kuroneko ao compartilhar ou gravar a tela", isOn: Binding(

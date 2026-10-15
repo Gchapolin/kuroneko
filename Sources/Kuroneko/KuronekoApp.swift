@@ -57,8 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CommandDoubleTap.shared.start {
             QuickNoteController.shared.toggle(state: AppState.shared)
         }
-        AppState.shared.onMeetingActive { active in
-            TypingCatController.shared.update(visible: active) { AppState.shared.isSomeoneSpeaking() }
+        AppState.shared.onTypingCat { visible in
+            TypingCatController.shared.update(visible: visible) { AppState.shared.isSomeoneSpeaking() }
         }
         AppState.shared.onVoicePrompt { meetingId in
             VoicePromptController.shared.update(meetingId: meetingId, state: AppState.shared)

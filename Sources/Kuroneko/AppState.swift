@@ -9,7 +9,7 @@ import ServiceManagement
 final class AppState {
     private(set) var activeMeeting: Meeting? {
         didSet {
-            if (oldValue == nil) != (activeMeeting == nil) { meetingActiveHandler(activeMeeting != nil) }
+            if (oldValue == nil) != (activeMeeting == nil) { updateTypingCat() }
         }
     }
     private(set) var isRecording = false
@@ -21,6 +21,7 @@ final class AppState {
     private(set) var extraVocabulary: String
     private(set) var hiddenFromScreenCapture: Bool
     private(set) var autoSummarize: Bool
+    private(set) var showTypingCat: Bool
     /// Bumped whenever stored data changes; views reload on it.
     private(set) var dataVersion = 0
     /// Meetings whose summary is being written or waits its turn.
@@ -37,7 +38,7 @@ final class AppState {
     private var policy = AutoRecordPolicy()
     private var voicePrompts = VoicePromptSchedule()
     @ObservationIgnored private var voicePromptHandler: (Int64?) -> Void = { _ in }
-    @ObservationIgnored private var meetingActiveHandler: (Bool) -> Void = { _ in }
+    @ObservationIgnored private var typingCatHandler: (Bool) -> Void = { _ in }
     @ObservationIgnored private var promptedMeetingId: Int64?
     @ObservationIgnored private var externalChanges: NSObjectProtocol?
     @ObservationIgnored private let summarizer: Summarizer
@@ -52,6 +53,7 @@ final class AppState {
     private static let autoRecordKey = "autoRecord"
     private static let hiddenFromScreenCaptureKey = "hiddenFromScreenCapture"
     static let autoSummarizeKey = "autoSummarize"
+    private static let showTypingCatKey = "showTypingCat"
     nonisolated static let vocabularyKey = "extraVocabulary"
 
     init(db: AppDatabase, storage: MeetingStorage) {
@@ -61,6 +63,7 @@ final class AppState {
         extraVocabulary = UserDefaults.standard.string(forKey: Self.vocabularyKey) ?? ""
         hiddenFromScreenCapture = UserDefaults.standard.object(forKey: Self.hiddenFromScreenCaptureKey) as? Bool ?? true
         autoSummarize = UserDefaults.standard.object(forKey: Self.autoSummarizeKey) as? Bool ?? true
+        showTypingCat = UserDefaults.standard.object(forKey: Self.showTypingCatKey) as? Bool ?? true
         summarizer = Summarizer(db: db)
         let processor = MeetingProcessor(
             db: db,
@@ -311,12 +314,6 @@ final class AppState {
     }
 
     /// Shows (a meeting id) or hides (nil) the "who was speaking?" prompt.
-    /// Called when a meeting starts or ends.
-    func onMeetingActive(_ handler: @escaping (Bool) -> Void) {
-        meetingActiveHandler = handler
-        handler(isMeetingActive)
-    }
-
     func onVoicePrompt(_ handler: @escaping (Int64?) -> Void) {
         voicePromptHandler = handler
         promptedMeetingId = nil
@@ -380,6 +377,23 @@ final class AppState {
     func setAutoRecord(_ enabled: Bool) {
         autoRecord = enabled
         UserDefaults.standard.set(enabled, forKey: Self.autoRecordKey)
+    }
+
+    /// Shows (true) or hides (false) the typing kitten: called when a meeting
+    /// starts or ends and when the setting changes.
+    func onTypingCat(_ handler: @escaping (Bool) -> Void) {
+        typingCatHandler = handler
+        updateTypingCat()
+    }
+
+    private func updateTypingCat() {
+        typingCatHandler(isMeetingActive && showTypingCat)
+    }
+
+    func setShowTypingCat(_ enabled: Bool) {
+        showTypingCat = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.showTypingCatKey)
+        updateTypingCat()
     }
 
     func setHiddenFromScreenCapture(_ hidden: Bool) {
